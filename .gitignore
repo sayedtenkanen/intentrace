@@ -24,3 +24,6 @@ uv.lock.bak
 *.swp
 .idea/
 .vscode/
+
+# Slice briefs (local working docs)
+docs/slices/
