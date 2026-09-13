@@ -346,8 +346,11 @@ product — a requirement system that lives only inside an agent session can blo
   rebuildable index.
 - Written fresh for this project — no code shared with Keel or AutoHarness. Schema freedom
   is the reason; the cost is solving torn-line detection and rebuildable indexing again.
-- Python, uv + hatchling, pydantic v2, ruff + mypy strict. `[OPEN-7: confirm]`
+- Python `>=3.12`, uv + hatchling, pydantic v2, ruff + mypy strict. Confirmed in slice 1;
+  OPEN-7 is closed.
 - tree-sitter for anchoring, multi-language from day one: python, typescript, c.
+  **Implementation status: Python only.** `AnchorRef.lang` currently admits `python`
+  alone; TypeScript and C are planned and not wired.
 
 **C is parse-level only in v1.** tree-sitter parses C but macro semantics are invisible to
 it, and extract-function refactors in C frequently move macros. Success criterion 2 will be
@@ -398,7 +401,6 @@ judged without it.
   clean. The prompt→requirement→ReqIF path is a real unfilled gap in automotive.
 - **OPEN-5 — Second agent adapter.** v1 assumes Claude Code hooks only.
 - **OPEN-6 — License, public or private repo.**
-- **OPEN-7 — Stack confirmation.** §13 assumes the Keel stack.
 - **OPEN-8 — Diff attribution under concurrent sessions.** §9.3.
 
 ## 17. Known risks
@@ -431,7 +433,8 @@ until mid-Phase B. That contradicts the method used on Keel and AutoHarness.
 - **Slice 6 — verdict lattice and `check`**, including the §12.2 vacuity conditions.
 - **Slice 7+ — tree-sitter TS and C, evidence links, waivers, decay, coverage report.**
 
-Full slice plan written separately once this spec survives review.
+A full `docs/SLICE_PLAN.md` expanding these into tasks is still to be written; the list
+above is the current authority. Per-slice status is tracked in `docs/PROGRESS.md`.
 
 ## 19. Changes from v0.1
 

@@ -44,24 +44,25 @@ verifying it:
 ```
 $ intentrace why src/retry.py:42
 
-R-0142   active · unverified
-  "Transient failures are retried before surfacing to the caller."
+R-18a7663f   sketch · unverified
+  "The attempt function should retry on any exception."
 
-  origin     co-derived
-  said       2026-09-04  "don't fail on the first timeout, give it a few goes"
-  built      diff 8f3a1c2, accepted 2026-09-04
-  ratified   2026-09-06 by sayed
+  origin     declared
+  quoted     "The attempt function should retry on any exception."
+  said       2026-09-04  session sess · turn 3
+  ratified   —
   anchors    src/retry.py::RetryPolicy::attempt
   evidence   none — nothing is checking this
 ```
 
 Three things are deliberate in that output. The requirement quotes **your** words, not a
-paraphrase. `ratified` is a separate date from `accepted`, because agreeing a diff looks
-fine is not the same as taking responsibility for a behaviour. And `evidence: none` is
-printed rather than omitted — a requirement nothing verifies is a fact you should see, not
-a silence.
+paraphrase. `ratified` is printed even when nothing has been ratified, because agreeing a
+diff looks fine is not the same as taking responsibility for a behaviour — and until
+someone has, the dash is the honest answer. And `evidence: none` is printed rather than
+omitted: a requirement nothing verifies is a fact you should see, not a silence.
 
-*Illustrative. Not implemented yet.*
+Later slices add the states this cannot yet reach — `active` and a real `ratified` date
+arrive with the settle loop, `co-derived` origin with reverse extraction.
 
 ## What it does not do
 
@@ -95,14 +96,27 @@ of the current spec lists what changed between them and which finding forced eac
 
 ## Status and how to run it
 
-**There is nothing to install.** No package, no CLI, no entry point — if you cloned this
-expecting to run `intentrace`, stop here. The repository currently contains a design and
-its history, nothing executable.
+Slice 1 is implemented and has been through one review and remediation pass: `intentrace
+why` end to end against a deterministic fake extractor, Python anchoring only, no model and
+no gate. It runs against the bundled fixture:
 
-Pre-implementation. The first slice is `intentrace why <file>` working end to end against a
-deterministic fake extractor, Python anchoring only, no model and no gate.
+```
+uv sync --extra dev
+uv run intentrace ingest tests/fixtures/sample_project/observations.jsonl
+uv run intentrace why tests/fixtures/sample_project/retry.py:11
+```
 
-Eight decisions are open and marked as such in §16 of the spec, including requirement
+**What it cannot do yet.** Nothing is persisted between runs — requirements are re-derived
+from the log on every invocation and anchors are hashed against the source as it is at that
+moment. So while a stored hash and a fresh hash of changed code do differ, the tool has no
+earlier baseline to compare against and therefore **cannot detect drift across time yet**.
+That arrives with the decision log in slice 2, which is the first slice where a ratification
+gives drift something to be measured from.
+
+Divergences from the slice brief are recorded in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md),
+and per-slice status in [`docs/PROGRESS.md`](docs/PROGRESS.md).
+
+Seven decisions are open and marked as such in §16 of the spec, including requirement
 identity under re-derivation and diff attribution across concurrent agent sessions.
 
 ## Prior art and neighbours
