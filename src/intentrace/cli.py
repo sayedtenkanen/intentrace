@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
-import tree_sitter
+from pydantic import ValidationError
 
-from intentrace.anchor.python import build_anchor, parse_source, resolve_line_to_node
+from intentrace.anchor.python import (
+    _symbol_path,
+    build_anchor,
+    parse_source,
+    resolve_line_to_node,
+)
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import append_observation, read_observations
 from intentrace.models import AnchorRef, Observation, Requirement
@@ -29,6 +33,79 @@ def _find_repo_root() -> Path:
         if (parent / ".intentrace").exists() or (parent / ".git").exists():
             return parent
     return current
+
+
+def _build_symbol_table(repo_root: Path) -> dict[str, AnchorRef]:
+    """Scan all Python files in the repo and build a symbol name -> AnchorRef mapping."""
+    symbols: dict[str, AnchorRef] = {}
+    for py_file in repo_root.rglob("*.py"):
+        if ".venv" in py_file.parts or "__pycache__" in py_file.parts:
+            continue
+        try:
+            source = py_file.read_bytes()
+        except OSError:
+            continue
+        tree = parse_source(source)
+        repo_rel = str(py_file.relative_to(repo_root))
+        _collect_symbols(tree, repo_rel, source, symbols)
+    return symbols
+
+
+def _collect_symbols(
+    tree: object,
+    file_path: str,
+    source: bytes,
+    symbols: dict[str, AnchorRef],
+) -> None:
+    """Collect function and class symbols from a tree-sitter tree.
+
+    build_anchor already traverses the tree to find symbols, so we just
+    need to find the names of all function/class definitions and let
+    build_anchor do the lookup.
+    """
+    import tree_sitter
+
+    if not isinstance(tree, tree_sitter.Tree):
+        return
+
+    root = tree.root_node
+    _collect_symbols_from_node(root, file_path, tree, source, symbols)
+
+
+def _collect_symbols_from_node(
+    node: object,
+    file_path: str,
+    tree: object,
+    source: bytes,
+    symbols: dict[str, AnchorRef],
+) -> None:
+    """Recursively collect symbols from a tree-sitter node."""
+    import tree_sitter
+
+    if not isinstance(node, tree_sitter.Node):
+        return
+
+    if node.type in ("function_definition", "class_definition"):
+        name = _node_name(node, source)
+        if name and name not in symbols:
+            anchor = build_anchor(file_path, tree, source, name)  # type: ignore[arg-type]
+            if anchor:
+                symbols[name] = anchor
+
+    for child in node.children:
+        _collect_symbols_from_node(child, file_path, tree, source, symbols)
+
+
+def _node_name(node: object, source: bytes) -> str:
+    """Get the name of a function or class node."""
+    import tree_sitter
+
+    if not isinstance(node, tree_sitter.Node):
+        return ""
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return ""
+    return source[name_node.start_byte : name_node.end_byte].decode()
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -50,13 +127,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             except json.JSONDecodeError:
                 print(f"error: invalid JSON on line {line_num}", file=sys.stderr)
                 return 1
-            obs = Observation.model_validate(data)
+            try:
+                obs = Observation.model_validate(data)
+            except ValidationError as e:
+                print(
+                    f"error: invalid observation on line {line_num}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
             append_observation(repo_root, obs)
 
     return 0
 
 
-def _format_requirement(req: Requirement, obs: Observation | None, source_text: str | None) -> str:
+def _format_requirement(req: Requirement, obs: Observation | None) -> str:
     """Format a requirement for display."""
     lines: list[str] = []
     req_short = f"R-{req.req_id[:8]}"
@@ -68,18 +152,16 @@ def _format_requirement(req: Requirement, obs: Observation | None, source_text: 
     lines.append("")
     lines.append(f"  origin     {req.origin}")
 
-    if obs:
-        ts = obs.timestamp.strftime("%Y-%m-%d")
-        session_turn = f"session {obs.session_id[:4]} \u00b7 turn {obs.turn_index}"
-        lines.append(f"  said       {ts}  {session_turn}")
-
-    # Show quoted span from source text
-    if source_text and req.provenance:
+    # Show quoted span from the observation text (the human's words)
+    if obs and req.provenance:
         span = req.provenance[0]
-        quoted = source_text[span.start : span.end]
+        quoted = obs.text[span.start : span.end]
         if len(quoted) > 60:
             quoted = quoted[:57] + "..."
         lines.append(f'  quoted     "{quoted}"')
+        ts = obs.timestamp.strftime("%Y-%m-%d")
+        session_turn = f"session {obs.session_id[:4]} \u00b7 turn {obs.turn_index}"
+        lines.append(f"  said       {ts}  {session_turn}")
 
     lines.append("  ratified   \u2014")  # never ratified in Slice 1
 
@@ -96,68 +178,6 @@ def _format_requirement(req: Requirement, obs: Observation | None, source_text: 
         lines.append("  evidence   none \u2014 nothing is checking this")
 
     return "\n".join(lines)
-
-
-def _resolve_symbols_from_statement(
-    statement: str, file_path: str, tree: tree_sitter.Tree, source: bytes
-) -> list[AnchorRef]:
-    """Try to resolve symbols mentioned in a requirement statement to code anchors."""
-    # Look for Class.method patterns
-    class_method_re = re.compile(r"\b([A-Z][A-Za-z0-9_]+)\.([a-z][A-Za-z0-9_]+)\b")
-    # Look for standalone function/method names
-    word_re = re.compile(r"\b([a-z][A-Za-z0-9_]+)\b")
-
-    anchors: list[AnchorRef] = []
-    seen: set[str] = set()
-
-    # Try Class.method first
-    for match in class_method_re.finditer(statement):
-        _class_name, method_name = match.groups()
-        # Try the method name as a symbol
-        anchor = build_anchor(file_path, tree, source, method_name)
-        if anchor and anchor.symbol_path not in seen:
-            anchors.append(anchor)
-            seen.add(anchor.symbol_path)
-
-    # Try standalone words (skip common English words)
-    skip_words = {
-        "the",
-        "and",
-        "for",
-        "that",
-        "this",
-        "with",
-        "from",
-        "are",
-        "was",
-        "must",
-        "should",
-        "never",
-        "always",
-        "don't",
-        "do",
-        "not",
-        "it",
-        "a",
-        "an",
-        "in",
-        "on",
-        "to",
-        "of",
-        "is",
-        "be",
-        "as",
-        "at",
-    }
-    for match in word_re.finditer(statement):
-        word = match.group(1)
-        if word not in skip_words and word not in seen:
-            anchor = build_anchor(file_path, tree, source, word)
-            if anchor and anchor.symbol_path not in seen:
-                anchors.append(anchor)
-                seen.add(anchor.symbol_path)
-
-    return anchors
 
 
 def cmd_why(args: argparse.Namespace) -> int:
@@ -198,10 +218,21 @@ def cmd_why(args: argparse.Namespace) -> int:
     result = read_observations(repo_root)
     if result.torn_line:
         print(f"warning: {result.torn_line}", file=sys.stderr)
+    if result.corrupt_line:
+        print(f"error: {result.corrupt_line}", file=sys.stderr)
+        return 1
 
-    # Extract requirements
+    if not result.observations:
+        print(
+            "no observations recorded — run 'intentrace ingest' first",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Build symbol table and extract requirements with anchors
+    symbols = _build_symbol_table(repo_root)
     extractor = FakeExtractor()
-    requirements = extractor.extract(result.observations)
+    requirements = extractor.extract(result.observations, symbols=symbols)
 
     # Build a store to hold them
     store = MemoryStore(repo_root)
@@ -212,16 +243,13 @@ def cmd_why(args: argparse.Namespace) -> int:
     if line_num is not None:
         node = resolve_line_to_node(tree, line_num, source)
         if node is not None and node.type != "module":
-            from intentrace.anchor.python import _symbol_path
-
             target_symbol = _symbol_path(repo_rel, node, source)
 
-    # Find matching requirements by resolving symbols from statements
+    # Find matching requirements by reading stored anchors only
     found: list[tuple[Requirement, Observation | None]] = []
     seen_reqs: set[str] = set()
 
     for req in requirements:
-        # First check if requirement already has anchors for this file
         for anchor in req.anchors:
             if (
                 anchor.file == repo_rel
@@ -234,25 +262,12 @@ def cmd_why(args: argparse.Namespace) -> int:
                 found.append((req, obs))
                 seen_reqs.add(req.req_id)
 
-        # Also try to resolve symbols from the statement
-        resolved_anchors = _resolve_symbols_from_statement(req.statement, repo_rel, tree, source)
-        for anchor in resolved_anchors:
-            if (
-                target_symbol is None or anchor.symbol_path == target_symbol
-            ) and req.req_id not in seen_reqs:
-                obs = None
-                if req.provenance:
-                    obs = store.get_observation(req.provenance[0].obs_id)
-                found.append((req, obs))
-                seen_reqs.add(req.req_id)
-
     if not found:
         print("no intent covers this code")
         return 0
 
     for req, obs in found:
-        source_text = source.decode() if source else None
-        print(_format_requirement(req, obs, source_text))
+        print(_format_requirement(req, obs))
         print()
 
     return 0

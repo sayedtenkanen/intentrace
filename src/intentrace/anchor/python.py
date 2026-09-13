@@ -7,7 +7,6 @@ and resolves path:line to the innermost enclosing function or class.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 import tree_sitter
 import tree_sitter_python as tspython
@@ -36,22 +35,32 @@ def _symbol_path(file_path: str, node: tree_sitter.Node, source: bytes) -> str:
         current = current.parent
 
     parts.reverse()
-    return Path(file_path).name + "::" + "::".join(parts) if parts else Path(file_path).name
+    return file_path + "::" + "::".join(parts) if parts else file_path
 
 
 def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
-    """Normalize a subtree for hashing: exclude comments and whitespace, keep structure."""
+    """Normalize a subtree for hashing: exclude comments, docstrings, and whitespace.
+
+    Excludes:
+    - comment nodes
+    - leading docstrings (expression_statement containing a string as first child
+      of a function/class/module body)
+
+    Preserves all other string literals (they are behaviour).
+    """
     if node.type == "comment":
+        return ""
+
+    # Exclude leading docstrings: an expression_statement whose only significant
+    # child is a string, at the start of a function/class/module body
+    if node.type == "expression_statement" and _is_leading_docstring(node, source):
         return ""
 
     parts: list[str] = []
 
     if node.child_count == 0:
         # Leaf node — include token text
-        text = source[node.start_byte : node.end_byte].decode()
-        if node.type == "string":
-            return text  # keep string literals as-is
-        return text
+        return source[node.start_byte : node.end_byte].decode()
 
     for child in node.children:
         normalized = _normalize_subtree(child, source)
@@ -59,6 +68,47 @@ def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
             parts.append(normalized)
 
     return " ".join(parts)
+
+
+def _is_leading_docstring(node: tree_sitter.Node, source: bytes) -> bool:
+    """Check if an expression_statement is a leading docstring.
+
+    A leading docstring is an expression_statement that contains a single
+    string literal, positioned at the start of a function, class, or module body.
+    """
+    if node.type != "expression_statement":
+        return False
+
+    # Must have exactly one child that is a string
+    if node.child_count != 1:
+        return False
+
+    child = node.child(0)
+    if child is None or child.type != "string":
+        return False
+
+    # Check that the parent is a function/class body or module
+    parent = node.parent
+    if parent is None:
+        return False
+
+    if parent.type == "module":
+        return True
+
+    if parent.type == "block":
+        # Check if this is the first statement in the block
+        grandparent = parent.parent
+        if grandparent is not None and grandparent.type in (
+            "function_definition",
+            "class_definition",
+        ):
+            # Check if this is the first child of the block
+            for i in range(parent.child_count):
+                child_node = parent.child(i)
+                if child_node is not None and child_node.type != "comment":
+                    return child_node == node
+
+    return False
 
 
 def node_hash(node: tree_sitter.Node, source: bytes) -> str:
@@ -72,7 +122,8 @@ def resolve_line_to_node(
 ) -> tree_sitter.Node | None:
     """Resolve a 1-indexed line number to the innermost enclosing function or class.
 
-    Falls back to the module (root) if no function/class encloses the line.
+    Returns the most deeply nested function_definition or class_definition
+    that contains the target line. Falls back to the module root if none.
     """
     root = tree.root_node
     target_row = line - 1  # tree-sitter uses 0-indexed rows
@@ -81,12 +132,12 @@ def resolve_line_to_node(
 
     def _walk(node: tree_sitter.Node) -> None:
         nonlocal best
-        if (
-            node.type in ("function_definition", "class_definition")
-            and node.start_point[0] <= target_row <= node.end_point[0]
-        ):
-            best = node
         for child in node.children:
+            if (
+                child.type in ("function_definition", "class_definition")
+                and child.start_point[0] <= target_row <= child.end_point[0]
+            ):
+                best = child
             _walk(child)
 
     _walk(root)

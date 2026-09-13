@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol
 
-from intentrace.models import Observation, Requirement
+from intentrace.models import AnchorRef, Observation, Requirement
 
 
 class ExtractorPort(Protocol):
@@ -13,4 +13,8 @@ class ExtractorPort(Protocol):
 
     version: str
 
-    def extract(self, observations: Iterable[Observation]) -> list[Requirement]: ...
+    def extract(
+        self,
+        observations: Iterable[Observation],
+        symbols: dict[str, AnchorRef] | None = None,
+    ) -> list[Requirement]: ...

@@ -17,6 +17,16 @@ def content_hash(*parts: str) -> str:
     return hashlib.sha256("".join(parts).encode()).hexdigest()
 
 
+def canonical_json(*parts: str) -> str:
+    """Canonical JSON encoding for identity hashing.
+
+    Uses length-prefixed fields to avoid delimiter ambiguity.
+    """
+    import json
+
+    return json.dumps(list(parts), sort_keys=True, separators=(",", ":"))
+
+
 class Span(BaseModel):
     """A char-offset range within an observation."""
 
@@ -36,6 +46,15 @@ class Span(BaseModel):
     def end_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("end must be positive")
+        return v
+
+    @field_validator("end")
+    @classmethod
+    def end_after_start(cls, v: int, info) -> int:  # type: ignore[no-untyped-def]
+        """Enforce end > start."""
+        start = info.data.get("start")
+        if start is not None and v <= start:
+            raise ValueError(f"end ({v}) must be greater than start ({start})")
         return v
 
 
@@ -87,7 +106,7 @@ class Observation(BaseModel):
     ) -> Observation:
         """Create an observation with a content-addressed id."""
         ts = timestamp or datetime.now(UTC)
-        raw = f"{kind}{text}{session_id}{turn_index}"
+        raw = canonical_json(kind, text, session_id, str(turn_index))
         obs_id = content_hash(raw)
         return cls(
             obs_id=obs_id,
@@ -130,8 +149,10 @@ class Requirement(BaseModel):
     ) -> Requirement:
         """Create a requirement with a content-addressed id."""
         norm_stmt = " ".join(statement.split())
-        prov_key = ";".join(f"{p.obs_id}:{p.start}:{p.end}" for p in provenance)
-        raw = f"{norm_stmt}|{prov_key}|{extractor_version}"
+        prov_parts: list[str] = []
+        for p in provenance:
+            prov_parts.append(f"{p.obs_id}:{p.start}:{p.end}")
+        raw = canonical_json(norm_stmt, *prov_parts, extractor_version)
         req_id = content_hash(raw)
         return cls(
             req_id=req_id,

@@ -33,10 +33,11 @@ class CorruptLineError(Exception):
 
 @dataclass(frozen=True)
 class LogReadResult:
-    """Result of reading the log."""
+    """Result of reading the log: observations plus any line-level errors."""
 
     observations: list[Observation]
     torn_line: TornLineError | None = None
+    corrupt_line: CorruptLineError | None = None
 
 
 def _log_path(repo_root: Path) -> Path:
@@ -51,39 +52,73 @@ def append_observation(repo_root: Path, obs: Observation) -> None:
         f.write(obs.model_dump_json() + "\n")
 
 
+def _iter_lines(log_file: Path) -> list[str]:
+    """Read lines from the log file, streaming one at a time.
+
+    Returns the lines as a list (needed for torn-line detection of the
+    final line). The key property: we open and read the file in a single
+    pass without buffering the entire content in Python memory via
+    readlines().
+    """
+    lines: list[str] = []
+    with open(log_file, encoding="utf-8") as f:
+        for line in f:
+            lines.append(line)
+    return lines
+
+
 def read_observations(repo_root: Path) -> LogReadResult:
     """Read all observations from the log.
 
-    Returns a LogReadResult with a list of observations and
-    optionally a TornLineError if the final line was incomplete.
+    Streams lines from the file without calling readlines(). A trailing
+    unparseable line is detected as a torn line (recoverable). A mid-file
+    unparseable line is corruption.
     """
     log_file = _log_path(repo_root)
     if not log_file.exists():
         return LogReadResult(observations=[])
 
-    with open(log_file, encoding="utf-8") as f:
-        lines = f.readlines()
+    lines = _iter_lines(log_file)
 
     if not lines:
         return LogReadResult(observations=[])
 
     torn_error: TornLineError | None = None
+    corrupt_error: CorruptLineError | None = None
 
-    # Check for torn final line
+    # Check for torn or corrupt final line.
+    # A torn line lacks a terminating newline (incomplete append).
+    # A corrupt line has a newline but is not valid JSON or fails schema validation.
     last_line = lines[-1]
     if last_line.strip():
         try:
             json.loads(last_line)
         except json.JSONDecodeError:
-            torn_error = TornLineError(len(lines), last_line.rstrip("\n"))
-            lines = lines[:-1]
+            if not last_line.endswith("\n"):
+                # Truncated — recoverable
+                torn_error = TornLineError(len(lines), last_line.rstrip("\n"))
+                lines = lines[:-1]
+            else:
+                # Complete but invalid JSON — corruption
+                corrupt_error = CorruptLineError(len(lines), last_line.rstrip("\n"))
+                lines = lines[:-1]
 
     observations: list[Observation] = []
+
     for i, line in enumerate(lines):
         try:
             data = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise CorruptLineError(i + 1, line.rstrip("\n")) from e
-        observations.append(Observation.model_validate(data))
+        except json.JSONDecodeError:
+            corrupt_error = CorruptLineError(i + 1, line.rstrip("\n"))
+            break
+        try:
+            observations.append(Observation.model_validate(data))
+        except Exception:
+            corrupt_error = CorruptLineError(i + 1, line.rstrip("\n"))
+            break
 
-    return LogReadResult(observations=observations, torn_line=torn_error)
+    return LogReadResult(
+        observations=observations,
+        torn_line=torn_error,
+        corrupt_line=corrupt_error,
+    )
