@@ -45,24 +45,43 @@ def test_round_trip_append_read(repo_root: Path) -> None:
 
 
 def test_torn_final_line_reported(repo_root: Path) -> None:
-    """Torn final line is reported as recoverable, not dropped and not fatal."""
+    """Torn final line (no newline) is reported as recoverable."""
     obs = _make_obs("complete")
     append_observation(repo_root, obs)
 
-    # Manually append a torn line
+    # Append a torn line — no trailing newline means truncated append
     log_file = repo_root / ".intentrace" / "log.jsonl"
     with open(log_file, "a") as f:
-        f.write('{"obs_id":"broken","session_id":"s1","turn":1')  # incomplete JSON
+        f.write('{"obs_id":"broken","session_id":"s1","turn":1')  # no newline
 
     result = read_observations(repo_root)
     assert len(result.observations) == 1
     assert result.torn_line is not None
     assert isinstance(result.torn_line, TornLineError)
+    assert result.corrupt_line is None
     assert result.observations[0].text == "complete"
 
 
-def test_corrupt_mid_file_line_raises(repo_root: Path) -> None:
-    """A mid-file unparseable line raises CorruptLineError."""
+def test_corrupt_final_line_reported(repo_root: Path) -> None:
+    """Corrupt final line (has newline but invalid JSON) is reported as corruption."""
+    obs = _make_obs("complete")
+    append_observation(repo_root, obs)
+
+    # Append a corrupt line — has newline but invalid JSON
+    log_file = repo_root / ".intentrace" / "log.jsonl"
+    with open(log_file, "a") as f:
+        f.write("NOT VALID JSON\n")
+
+    result = read_observations(repo_root)
+    assert len(result.observations) == 1
+    assert result.corrupt_line is not None
+    assert isinstance(result.corrupt_line, CorruptLineError)
+    assert result.torn_line is None
+    assert result.observations[0].text == "complete"
+
+
+def test_corrupt_mid_file_line_reported(repo_root: Path) -> None:
+    """A mid-file unparseable line is reported via corrupt_line field."""
     obs1 = _make_obs("good1")
     obs2 = _make_obs("good2")
     append_observation(repo_root, obs1)
@@ -74,8 +93,12 @@ def test_corrupt_mid_file_line_raises(repo_root: Path) -> None:
     lines.insert(1, "NOT VALID JSON")
     log_file.write_text("\n".join(lines) + "\n")
 
-    with pytest.raises(CorruptLineError):
-        read_observations(repo_root)
+    result = read_observations(repo_root)
+    assert result.corrupt_line is not None
+    assert isinstance(result.corrupt_line, CorruptLineError)
+    assert result.corrupt_line.line_number == 2
+    # Only the first good observation was parsed before corruption
+    assert len(result.observations) == 1
 
 
 def test_empty_log(repo_root: Path) -> None:

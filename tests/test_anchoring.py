@@ -115,6 +115,34 @@ def test_node_hash_unaffected_by_sibling() -> None:
     assert node_hash(func_a, source_a) == node_hash(func_b, source_b)
 
 
+def test_node_hash_ignores_docstring() -> None:
+    """Editing a docstring does not change node_hash."""
+    source_a = b'def foo():\n    """Original docstring."""\n    return 42\n'
+    source_b = b'def foo():\n    """Modified docstring."""\n    return 42\n'
+
+    tree_a = parse_source(source_a)
+    tree_b = parse_source(source_b)
+
+    func_a = tree_a.root_node.child(0)
+    func_b = tree_b.root_node.child(0)
+
+    assert node_hash(func_a, source_a) == node_hash(func_b, source_b)
+
+
+def test_node_hash_changes_on_return_string() -> None:
+    """Changing a string used in a return value does change node_hash."""
+    source_a = b'def foo():\n    return "hello"\n'
+    source_b = b'def foo():\n    return "world"\n'
+
+    tree_a = parse_source(source_a)
+    tree_b = parse_source(source_b)
+
+    func_a = tree_a.root_node.child(0)
+    func_b = tree_b.root_node.child(0)
+
+    assert node_hash(func_a, source_a) != node_hash(func_b, source_b)
+
+
 def test_resolve_line_to_method() -> None:
     """path:line inside a method resolves to that method, not the class."""
     tree = parse_source(SAMPLE_SOURCE)
@@ -164,3 +192,18 @@ def test_build_anchor_not_found() -> None:
     tree = parse_source(SAMPLE_SOURCE)
     anchor = build_anchor("retry.py", tree, SAMPLE_SOURCE, "nonexistent")
     assert anchor is None
+
+
+def test_symbol_path_includes_directory() -> None:
+    """Two files with the same basename in different directories produce different symbol paths."""
+    source = b"def foo():\n    pass\n"
+    tree = parse_source(source)
+
+    anchor_a = build_anchor("src/pkg/retry.py", tree, source, "foo")
+    anchor_b = build_anchor("tests/fixtures/retry.py", tree, source, "foo")
+
+    assert anchor_a is not None
+    assert anchor_b is not None
+    assert anchor_a.symbol_path != anchor_b.symbol_path
+    assert anchor_a.symbol_path == "src/pkg/retry.py::foo"
+    assert anchor_b.symbol_path == "tests/fixtures/retry.py::foo"
