@@ -165,16 +165,29 @@ be multi-hop) and:
 2. Prints a note: `migrated from R-{old_id[:8]} via decision {dec_id[:8]}`.
 3. If the chain is ambiguous (one old id maps to multiple new ids — a split), it prints
   all successors.
+4. A **cycle guard** detects loops (A→B→A) and stops traversal, returning the requirement
+   at the last unvisited node. This prevents infinite traversal without bounding history.
+5. **Chain compression** is applied at migration time: when a new migration maps
+   old_id→current_id, the existing alias record for old_id→previous_id is updated to
+   point directly to current_id. This keeps old→current a single hop regardless of how
+   many migrations have occurred.
 
 **Rationale:** The user pasting a stale id from an old PR comment must get an answer, not a
 miss. The alias table is the bridge between old and new identities. Storing it as a
 `Decision` in the log means it has the same immutability and auditability as ratifications.
 
+Capping the *work* (cycle guard) rather than the *history* (depth limit) preserves full
+auditability. A depth limit would manufacture misses after N upgrades — precisely the miss
+§5 opens by promising to prevent. Chain compression at migration time keeps resolution
+efficient without discarding history: the compressed path is derived, not deleted.
+
 **What this forbids:**
 - Deleting old requirement records when they are superseded. The log keeps everything.
 - Making alias resolution silent. Every resolution prints the migration path.
-- Allowing alias chains longer than a configurable depth (suggested: 5). Longer chains
-  indicate a design problem, not a normal workflow.
+- Allowing unbounded traversal work. A cycle guard terminates loops; chain compression
+  keeps resolution O(1) after each migration.
+- Imposing a depth limit that would cause stale ids to stop resolving after N upgrades.
+  The human pasting an id from an old PR must always get an answer.
 
 ---
 
