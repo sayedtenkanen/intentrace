@@ -120,7 +120,10 @@ Decision {
 ### 6.2 Requirement
 
 ```
-req_id            content-addressed (see OPEN-1)
+req_id            content hash of {normalized_statement, provenance[], extractor_version}
+                  — anchors are excluded; normalization (collapse whitespace, lowercase,
+                  strip trailing punctuation) applies to the hash input only, not the
+                  stored statement (design note: docs/design/requirement-identity.md §2)
 statement         natural language, behavioural, implementation-free
 origin            declared | recovered | co-derived
 maturity          sketch | active | locked
@@ -388,10 +391,11 @@ judged without it.
 
 ## 16. Open decisions
 
-- **OPEN-1 — Requirement identity and migration.** Partially resolved by I1: ratified
-  requirements are primary, so re-derivation cannot orphan decision history. Still open:
-  the migration proposal format, and how legitimate requirement *splits* are represented.
-  Deserves its own design note.
+- **OPEN-1 — Requirement identity and migration. [DECIDED]** Settled in
+  `docs/design/requirement-identity.md`. `req_id` hashes statement + provenance + extractor
+  version; anchors are excluded. Splits use `supersedes[]`; the alias table is a
+  `Decision(kind="migrate")` record in the log. Migration proposals are human-confirmed,
+  never auto-accepted.
 - **OPEN-2 — Degenerate mode.** A user who never ratifies gets an LLM documentation
   generator with extra ceremony. Acceptable on-ramp, or a failure to design friction
   against? Probably the modal first-month behaviour either way.
@@ -450,3 +454,5 @@ above is the current authority. Per-slice status is tracked in `docs/PROGRESS.md
 | 8 | I9; provenance must be non-empty | v0.1 allowed empty provenance for code recovery, falsifying the grounding claim for that whole class |
 | 9 | §18 slice plan made vertical | Horizontal phases delayed all user-visible value to mid-Phase B |
 | 10 | §13 C preprocessor caveat | Refactor invariance is materially weaker for C, the language the ASPICE path needs |
+| 11 | OPEN-1 decided; req_id excludes anchors; alias table as Decision | Identity must be refactor-invariant (I6); anchors are mutable metadata. Migration proposals are human-confirmed (I1). See docs/design/requirement-identity.md |
+| 12 | req_id normalization is hash-only; stored statement is verbatim | Normalizing the stored statement would lowercase human-authored text, breaking provenance display. Hash input is normalized; stored statement retains original case and punctuation. See docs/design/requirement-identity.md §2 |
