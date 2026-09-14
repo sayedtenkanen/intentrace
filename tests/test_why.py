@@ -133,8 +133,12 @@ def test_why_anchor_populated(repo_root: Path) -> None:
     assert "retry.py::RetryPolicy::attempt" in result.stdout
 
 
-def test_node_hash_detects_drift(repo_root: Path) -> None:
-    """node_hash stored on the requirement differs from fresh hash after body change."""
+def test_node_hash_changes_on_body_edit(repo_root: Path) -> None:
+    """node_hash stored on the requirement differs from fresh hash after body change.
+
+    This verifies the hash *function* is sensitive to behaviour changes.
+    System-level drift detection requires persistence (slice 2).
+    """
     import json
 
     from intentrace.anchor.python import build_anchor, parse_source
@@ -159,12 +163,19 @@ def test_node_hash_detects_drift(repo_root: Path) -> None:
     original_hash = original_anchor.node_hash
 
     # Extract with the symbol table
-    symbols = {"attempt": original_anchor}
+    from intentrace.symbol import SymbolTable
+
+    table = SymbolTable()
+    table.by_qualified[original_anchor.symbol_path] = original_anchor
+    bare = original_anchor.symbol_path.rsplit("::", 1)[-1]
+    table.by_bare[bare] = [original_anchor]
     extractor = FakeExtractor()
-    reqs = extractor.extract(observations, symbols=symbols)
+    reqs = extractor.extract(observations, symbols=table)
 
     # Find a requirement anchored to attempt
-    anchored = [r for r in reqs if any(a.symbol_path.endswith("attempt") for a in r.anchors)]
+    anchored = [
+        r for r in reqs.requirements if any(a.symbol_path.endswith("attempt") for a in r.anchors)
+    ]
     assert len(anchored) > 0, "expected at least one requirement anchored to attempt"
     stored_hash = anchored[0].anchors[0].node_hash
     assert stored_hash == original_hash

@@ -53,12 +53,11 @@ def append_observation(repo_root: Path, obs: Observation) -> None:
 
 
 def _iter_lines(log_file: Path) -> list[str]:
-    """Read lines from the log file, streaming one at a time.
+    """Read all lines from the log file.
 
-    Returns the lines as a list (needed for torn-line detection of the
-    final line). The key property: we open and read the file in a single
-    pass without buffering the entire content in Python memory via
-    readlines().
+    Returns the lines as a list. The log is small in v1; streaming was
+    deferred. Torn-line detection requires inspecting the final line,
+    which a generator cannot do without consuming the entire stream.
     """
     lines: list[str] = []
     with open(log_file, encoding="utf-8") as f:
@@ -70,9 +69,9 @@ def _iter_lines(log_file: Path) -> list[str]:
 def read_observations(repo_root: Path) -> LogReadResult:
     """Read all observations from the log.
 
-    Streams lines from the file without calling readlines(). A trailing
-    unparseable line is detected as a torn line (recoverable). A mid-file
-    unparseable line is corruption.
+    Reads all lines and returns them as a list. A trailing unparseable
+    line is detected as a torn line (recoverable). A mid-file unparseable
+    line is corruption.
     """
     log_file = _log_path(repo_root)
     if not log_file.exists():

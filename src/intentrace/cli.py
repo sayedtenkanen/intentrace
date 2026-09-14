@@ -12,18 +12,20 @@ import json
 import sys
 from pathlib import Path
 
+import tree_sitter
 from pydantic import ValidationError
 
 from intentrace.anchor.python import (
-    _symbol_path,
     build_anchor,
     parse_source,
     resolve_line_to_node,
+    symbol_path,
 )
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import append_observation, read_observations
 from intentrace.models import AnchorRef, Observation, Requirement
 from intentrace.store import MemoryStore
+from intentrace.symbol import SymbolTable
 
 
 def _find_repo_root() -> Path:
@@ -35,9 +37,9 @@ def _find_repo_root() -> Path:
     return current
 
 
-def _build_symbol_table(repo_root: Path) -> dict[str, AnchorRef]:
-    """Scan all Python files in the repo and build a symbol name -> AnchorRef mapping."""
-    symbols: dict[str, AnchorRef] = {}
+def _build_symbol_table(repo_root: Path) -> SymbolTable:
+    """Scan all Python files and build a symbol table keyed by qualified path."""
+    table = SymbolTable()
     for py_file in repo_root.rglob("*.py"):
         if ".venv" in py_file.parts or "__pycache__" in py_file.parts:
             continue
@@ -46,66 +48,49 @@ def _build_symbol_table(repo_root: Path) -> dict[str, AnchorRef]:
         except OSError:
             continue
         tree = parse_source(source)
+        if not isinstance(tree, tree_sitter.Tree):
+            continue
         repo_rel = str(py_file.relative_to(repo_root))
-        _collect_symbols(tree, repo_rel, source, symbols)
-    return symbols
+        _collect_symbols(tree, repo_rel, source, table)
+    return table
 
 
 def _collect_symbols(
-    tree: object,
+    tree: tree_sitter.Tree,
     file_path: str,
     source: bytes,
-    symbols: dict[str, AnchorRef],
+    table: SymbolTable,
 ) -> None:
     """Collect function and class symbols from a tree-sitter tree.
 
-    build_anchor already traverses the tree to find symbols, so we just
-    need to find the names of all function/class definitions and let
-    build_anchor do the lookup.
+    Recurses into nested classes and functions so that methods like
+    RetryPolicy.attempt are indexed.
     """
-    import tree_sitter
-
-    if not isinstance(tree, tree_sitter.Tree):
-        return
-
-    root = tree.root_node
-    _collect_symbols_from_node(root, file_path, tree, source, symbols)
+    _collect_symbols_from_node(tree.root_node, file_path, tree, source, table)
 
 
 def _collect_symbols_from_node(
-    node: object,
+    node: tree_sitter.Node,
     file_path: str,
-    tree: object,
+    tree: tree_sitter.Tree,
     source: bytes,
-    symbols: dict[str, AnchorRef],
+    table: SymbolTable,
 ) -> None:
     """Recursively collect symbols from a tree-sitter node."""
-    import tree_sitter
-
-    if not isinstance(node, tree_sitter.Node):
-        return
-
     if node.type in ("function_definition", "class_definition"):
-        name = _node_name(node, source)
-        if name and name not in symbols:
-            anchor = build_anchor(file_path, tree, source, name)  # type: ignore[arg-type]
-            if anchor:
-                symbols[name] = anchor
+        anchor = build_anchor(file_path, tree, source, node=node)
+        if anchor is not None:
+            table.by_qualified[anchor.symbol_path] = anchor
+            _index_bare_name(anchor, table)
 
     for child in node.children:
-        _collect_symbols_from_node(child, file_path, tree, source, symbols)
+        _collect_symbols_from_node(child, file_path, tree, source, table)
 
 
-def _node_name(node: object, source: bytes) -> str:
-    """Get the name of a function or class node."""
-    import tree_sitter
-
-    if not isinstance(node, tree_sitter.Node):
-        return ""
-    name_node = node.child_by_field_name("name")
-    if name_node is None:
-        return ""
-    return source[name_node.start_byte : name_node.end_byte].decode()
+def _index_bare_name(anchor: AnchorRef, table: SymbolTable) -> None:
+    """Index an anchor by its bare symbol name (last component of symbol_path)."""
+    bare = anchor.symbol_path.rsplit("::", 1)[-1]
+    table.by_bare.setdefault(bare, []).append(anchor)
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -155,7 +140,7 @@ def _format_requirement(req: Requirement, obs: Observation | None) -> str:
     # Show quoted span from the observation text (the human's words)
     if obs and req.provenance:
         span = req.provenance[0]
-        quoted = obs.text[span.start : span.end]
+        quoted = obs.text[span.start : span.end].strip()
         if len(quoted) > 60:
             quoted = quoted[:57] + "..."
         lines.append(f'  quoted     "{quoted}"')
@@ -215,14 +200,14 @@ def cmd_why(args: argparse.Namespace) -> int:
     tree = parse_source(source)
 
     # Read the log
-    result = read_observations(repo_root)
-    if result.torn_line:
-        print(f"warning: {result.torn_line}", file=sys.stderr)
-    if result.corrupt_line:
-        print(f"error: {result.corrupt_line}", file=sys.stderr)
+    log_result = read_observations(repo_root)
+    if log_result.torn_line:
+        print(f"warning: {log_result.torn_line}", file=sys.stderr)
+    if log_result.corrupt_line:
+        print(f"error: {log_result.corrupt_line}", file=sys.stderr)
         return 1
 
-    if not result.observations:
+    if not log_result.observations:
         print(
             "no observations recorded — run 'intentrace ingest' first",
             file=sys.stderr,
@@ -232,7 +217,13 @@ def cmd_why(args: argparse.Namespace) -> int:
     # Build symbol table and extract requirements with anchors
     symbols = _build_symbol_table(repo_root)
     extractor = FakeExtractor()
-    requirements = extractor.extract(result.observations, symbols=symbols)
+    extraction = extractor.extract(log_result.observations, symbols=symbols)
+    requirements = extraction.requirements
+
+    # Report ambiguous symbols
+    for name, candidates in extraction.ambiguous_symbols.items():
+        paths = ", ".join(candidates)
+        print(f"warning: '{name}' resolves to multiple definitions: {paths}", file=sys.stderr)
 
     # Build a store to hold them
     store = MemoryStore(repo_root)
@@ -243,7 +234,7 @@ def cmd_why(args: argparse.Namespace) -> int:
     if line_num is not None:
         node = resolve_line_to_node(tree, line_num, source)
         if node is not None and node.type != "module":
-            target_symbol = _symbol_path(repo_rel, node, source)
+            target_symbol = symbol_path(repo_rel, node, source)
 
     # Find matching requirements by reading stored anchors only
     found: list[tuple[Requirement, Observation | None]] = []
