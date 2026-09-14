@@ -239,6 +239,46 @@ must see this and decide.
 
 ---
 
+## 6.5 Bounding requirement-set growth across migrations
+
+**Problem:** §4 says superseded requirements are not archived. §6 says orphans stay at their
+current maturity. Both are correct under I1 — and together they mean each migration leaves
+the old and the new copy both active, with nothing stated about what clears the backlog.
+Active requirements are what the gate reads, so the gate's input grows with every extractor
+upgrade.
+
+**Decision:** A superseded-but-unconfirmed requirement occupies a `pending_migration` queue.
+The queue is a view, not a new maturity — the requirement's actual maturity is unchanged
+(sketch, active, or locked). The queue filters for requirements that have a `supersedes[]`
+reference from a newer requirement and whose `req_id` does not appear as the successor in
+any alias record.
+
+The human clears the queue during `settle`. For each entry the human sees:
+
+1. The requirement at its current maturity.
+2. The successor requirement(s) that supersede it.
+3. The option to: (a) confirm the migration (creates the alias record, removes from queue),
+   (b) reject the migration (removes the `supersedes[]` reference, removes from queue), or
+   (c) defer (leaves the entry in the queue).
+
+The `settle` command does not proceed until the queue is empty or the human explicitly
+defers all entries. A deferred entry must be presented again at the next settle — it does
+not disappear.
+
+**Rationale:** "Not archived" is the right rule — I1 forbids silent disposal of human
+decisions. But "not archived" is not an answer to "what bounds growth?" The pending-migration
+queue makes the backlog visible and requires a human act to clear it. The gate reads the
+active requirement set; the queue ensures superseded entries are surfaced and acted on
+before the gate accumulates unbounded stale inputs.
+
+**What this forbids:**
+- Allowing superseded requirements to accumulate without human action. The queue must be
+  cleared or explicitly deferred at each settle.
+- Treating deferred entries as resolved. A deferred entry is re-presented at the next settle.
+- Auto-confirming migrations. Every entry requires a human decision.
+
+---
+
 ## Summary of decisions
 
 | Question | Decision | Key constraint satisfied |
