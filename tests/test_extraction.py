@@ -138,3 +138,97 @@ def test_provenance_corresponds_to_statement() -> None:
             f"  span:     {sliced!r}\n"
             f"  statement: {req.statement!r}"
         )
+
+
+def test_quoted_slice_has_no_surrounding_whitespace() -> None:
+    """For every requirement, the quoted slice stripped equals the statement."""
+    import json
+    from pathlib import Path
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "sample_project"
+    obs_file = fixture_dir / "observations.jsonl"
+
+    observations: list[Observation] = []
+    with open(obs_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            observations.append(Observation.model_validate(data))
+
+    extractor = FakeExtractor()
+    requirements = extractor.extract(observations)
+
+    obs_map = {obs.obs_id: obs for obs in observations}
+
+    for req in requirements:
+        span = req.provenance[0]
+        obs = obs_map[span.obs_id]
+        quoted = obs.text[span.start : span.end]
+        # The stripped quoted text should have no leading/trailing whitespace
+        assert quoted == quoted.strip(), (
+            f"quoted span has surrounding whitespace:\n  quoted: {quoted!r}"
+        )
+        # And it should equal the statement (which is normalized whitespace)
+        assert " ".join(quoted.split()) == req.statement
+
+
+def test_stored_statement_preserves_case_and_punctuation() -> None:
+    """R2: stored statement retains original case and trailing punctuation."""
+    obs = Observation.create(
+        session_id="s1",
+        turn_index=0,
+        kind="prompt",
+        text="The system MUST expose stack traces to the user.",
+    )
+    extractor = FakeExtractor()
+    reqs = extractor.extract([obs])
+    assert len(reqs) == 1
+    req = reqs[0]
+    # Stored statement must preserve original case and punctuation
+    assert req.statement == "The system MUST expose stack traces to the user."
+
+
+def test_same_req_id_for_case_whitespace_punctuation_diffs() -> None:
+    """R1+R2: statements differing only in case, trailing punctuation, or whitespace produce the same req_id."""
+    from intentrace.models import Requirement, Span
+
+    base_prov = [Span(obs_id="obs1", start=0, end=10)]
+
+    r1 = Requirement.create(
+        statement="The system must retry.",
+        provenance=base_prov,
+        extractor_version="fake-v1",
+    )
+    r2 = Requirement.create(
+        statement="  the  system  must  retry  ",
+        provenance=base_prov,
+        extractor_version="fake-v1",
+    )
+    r3 = Requirement.create(
+        statement="The System Must Retry!",
+        provenance=base_prov,
+        extractor_version="fake-v1",
+    )
+    # All three should have the same req_id
+    assert r1.req_id == r2.req_id == r3.req_id
+
+
+def test_different_req_id_for_normative_marker_diff() -> None:
+    """R1+R2: must vs should produces different req_ids (normative weight differs)."""
+    from intentrace.models import Requirement, Span
+
+    base_prov = [Span(obs_id="obs1", start=0, end=10)]
+
+    r_must = Requirement.create(
+        statement="The system must retry.",
+        provenance=base_prov,
+        extractor_version="fake-v1",
+    )
+    r_should = Requirement.create(
+        statement="The system should retry.",
+        provenance=base_prov,
+        extractor_version="fake-v1",
+    )
+    assert r_must.req_id != r_should.req_id

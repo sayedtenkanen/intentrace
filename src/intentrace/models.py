@@ -20,11 +20,23 @@ def content_hash(*parts: str) -> str:
 def canonical_json(*parts: str) -> str:
     """Canonical JSON encoding for identity hashing.
 
-    Uses length-prefixed fields to avoid delimiter ambiguity.
+    JSON-encodes the parts as a list with sorted keys and minimal separators.
     """
     import json
 
     return json.dumps(list(parts), sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_for_hash(statement: str) -> str:
+    """Normalize a statement for identity hashing only.
+
+    Applies collapse whitespace, lowercase, and strip trailing punctuation.
+    The stored statement is NOT normalized this way — only the hash input is.
+    """
+    normalized = " ".join(statement.split())
+    normalized = normalized.lower()
+    normalized = normalized.rstrip(".!?")
+    return normalized
 
 
 class Span(BaseModel):
@@ -147,16 +159,22 @@ class Requirement(BaseModel):
         extractor_version: str,
         anchors: list[AnchorRef] | None = None,
     ) -> Requirement:
-        """Create a requirement with a content-addressed id."""
-        norm_stmt = " ".join(statement.split())
+        """Create a requirement with a content-addressed id.
+
+        The hash input is normalized (collapse whitespace, lowercase, strip
+        trailing punctuation). The stored statement retains original case and
+        punctuation, with only whitespace collapsed for provenance span validity.
+        """
+        stored_stmt = " ".join(statement.split())
+        hash_input = _normalize_for_hash(statement)
         prov_parts: list[str] = []
         for p in provenance:
             prov_parts.append(f"{p.obs_id}:{p.start}:{p.end}")
-        raw = canonical_json(norm_stmt, *prov_parts, extractor_version)
+        raw = canonical_json(hash_input, *prov_parts, extractor_version)
         req_id = content_hash(raw)
         return cls(
             req_id=req_id,
-            statement=norm_stmt,
+            statement=stored_stmt,
             origin="declared",
             maturity="sketch",
             provenance=provenance,
