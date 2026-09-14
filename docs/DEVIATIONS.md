@@ -6,27 +6,40 @@ cannot be the norm inside the project itself.
 
 ---
 
-## D1 — Generator-reader requirement relaxed
+## Standing rule: comments are part of behaviour changes
+
+When you change what code does, the comment above it is part of the change. A comment that
+overstates, understates, or contradicts the code it describes is a defect of the same kind
+the product exists to detect. This has been found three times in review:
+
+1. **Streaming that buffered** — `_iter_lines` said it streamed without buffering, then
+   materialized every line into a list (D1).
+2. **JSON encoding called length-prefixed** — `canonical_json` said it used
+   length-prefixed fields; it JSON-encoded a list (B4, pre-slice-2).
+3. **Unstripped offsets claimed as final** — `_split_sentences` said offsets were
+   unstripped segment boundaries without noting the caller tightens them (R6, pre-slice-2
+   remediation).
+
+The rule: when you change behaviour, update the docstring, inline comment, and deviation
+record (if any) in the same commit. Do not leave a comment that describes the old behaviour.
+
+---
+
+## D1 — Log reader materialises all lines
 
 **Date:** 2026-09-14
 **Brief section:** §5.1 Log
 
 The brief required `read_observations` to return a generator and explicitly forbade
-materializing the file as a list in the reader. The implementation uses `readlines()`
-and returns a list.
-
-**What was found:** Torn-line detection requires reading the final line to determine
-whether it is complete. A generator cannot inspect the last element without consuming
-the entire stream first. The two goals — lazy reading and torn-line detection — are
-in tension for small logs.
+materializing the file as a list in the reader. The implementation reads all lines
+into a list.
 
 **What was done instead:** `read_observations` returns a `LogReadResult` containing a
-list of observations and an optional `TornLineError`. The log is small in Slice 1;
-the `Store` interface abstracts the storage layer so a streaming implementation can
-slot in later without touching callers.
+list of observations and an optional `TornLineError`. The log is small in Slice 1 and
+streaming was deferred.
 
-**Why:** The torn-line property is more valuable than streaming for v1. The store
-interface preserves the option to add streaming later.
+**Why:** The log is small in v1. Streaming was deferred to a later slice when the log
+may be larger.
 
 ---
 

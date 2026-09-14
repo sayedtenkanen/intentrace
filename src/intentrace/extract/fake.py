@@ -195,9 +195,10 @@ def _split_sentences(text: str) -> list[tuple[str, int, int]]:
     """Split text into (sentence, start_offset, end_offset) tuples.
 
     Uses a simple approach: split on sentence-ending punctuation,
-    keeping track of char offsets. Offsets refer to the unstripped
-    segment boundaries so that text[start:end] is a valid slice of
-    the original text.
+    keeping track of char offsets. Offsets are unstripped: the returned
+    sentence text is stripped, but start/end are the original boundaries
+    so that text[start:end] is a valid (possibly whitespace-padded) slice.
+    The caller tightens offsets to stripped bounds for provenance spans.
     """
     results: list[tuple[str, int, int]] = []
     current_start = 0
