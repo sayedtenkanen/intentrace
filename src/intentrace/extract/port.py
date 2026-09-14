@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from intentrace.models import AnchorRef, Observation, Requirement
+from intentrace.models import Observation, Requirement
+
+if TYPE_CHECKING:
+    from intentrace.symbol import SymbolTable
 
 
 class ExtractorPort(Protocol):
@@ -16,5 +19,5 @@ class ExtractorPort(Protocol):
     def extract(
         self,
         observations: Iterable[Observation],
-        symbols: dict[str, AnchorRef] | None = None,
+        symbols: SymbolTable | None = None,
     ) -> list[Requirement]: ...

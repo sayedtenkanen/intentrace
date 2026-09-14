@@ -195,7 +195,7 @@ def test_stored_statement_preserves_case_and_punctuation() -> None:
 
 
 def test_same_req_id_for_case_whitespace_punctuation_diffs() -> None:
-    """R1+R2: statements differing only in case, trailing punctuation, or whitespace produce the same req_id."""
+    """R1+R2: case, trailing punctuation, or whitespace diffs produce same req_id."""
     from intentrace.models import Requirement, Span
 
     base_prov = [Span(obs_id="obs1", start=0, end=10)]

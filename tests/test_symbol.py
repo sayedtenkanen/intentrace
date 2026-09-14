@@ -5,7 +5,7 @@ from __future__ import annotations
 from intentrace.anchor.python import build_anchor, parse_source
 from intentrace.extract.fake import FakeExtractor
 from intentrace.models import Observation
-from intentrace.symbol import Ambiguous, Resolved, SymbolTable
+from intentrace.symbol import Ambiguous, SymbolTable
 
 
 def test_same_name_different_files_deterministic() -> None:

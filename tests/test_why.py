@@ -173,7 +173,9 @@ def test_node_hash_changes_on_body_edit(repo_root: Path) -> None:
     reqs = extractor.extract(observations, symbols=table)
 
     # Find a requirement anchored to attempt
-    anchored = [r for r in reqs.requirements if any(a.symbol_path.endswith("attempt") for a in r.anchors)]
+    anchored = [
+        r for r in reqs.requirements if any(a.symbol_path.endswith("attempt") for a in r.anchors)
+    ]
     assert len(anchored) > 0, "expected at least one requirement anchored to attempt"
     stored_hash = anchored[0].anchors[0].node_hash
     assert stored_hash == original_hash

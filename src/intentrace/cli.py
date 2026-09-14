@@ -200,14 +200,14 @@ def cmd_why(args: argparse.Namespace) -> int:
     tree = parse_source(source)
 
     # Read the log
-    result = read_observations(repo_root)
-    if result.torn_line:
-        print(f"warning: {result.torn_line}", file=sys.stderr)
-    if result.corrupt_line:
-        print(f"error: {result.corrupt_line}", file=sys.stderr)
+    log_result = read_observations(repo_root)
+    if log_result.torn_line:
+        print(f"warning: {log_result.torn_line}", file=sys.stderr)
+    if log_result.corrupt_line:
+        print(f"error: {log_result.corrupt_line}", file=sys.stderr)
         return 1
 
-    if not result.observations:
+    if not log_result.observations:
         print(
             "no observations recorded — run 'intentrace ingest' first",
             file=sys.stderr,
@@ -217,11 +217,11 @@ def cmd_why(args: argparse.Namespace) -> int:
     # Build symbol table and extract requirements with anchors
     symbols = _build_symbol_table(repo_root)
     extractor = FakeExtractor()
-    result = extractor.extract(result.observations, symbols=symbols)
-    requirements = result.requirements
+    extraction = extractor.extract(log_result.observations, symbols=symbols)
+    requirements = extraction.requirements
 
     # Report ambiguous symbols
-    for name, candidates in result.ambiguous_symbols.items():
+    for name, candidates in extraction.ambiguous_symbols.items():
         paths = ", ".join(candidates)
         print(f"warning: '{name}' resolves to multiple definitions: {paths}", file=sys.stderr)
 

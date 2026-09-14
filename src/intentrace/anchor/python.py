@@ -22,7 +22,7 @@ def parse_source(source: bytes) -> tree_sitter.Tree:
     return _parser.parse(source)
 
 
-def _symbol_path(file_path: str, node: tree_sitter.Node, source: bytes) -> str:
+def symbol_path(file_path: str, node: tree_sitter.Node, source: bytes) -> str:
     """Build a symbol path like 'retry.py::RetryPolicy::attempt'."""
     parts: list[str] = []
     current: tree_sitter.Node | None = node
@@ -148,18 +148,28 @@ def build_anchor(
     file_path: str,
     tree: tree_sitter.Tree,
     source: bytes,
-    symbol_name: str,
+    symbol_name: str | None = None,
+    node: tree_sitter.Node | None = None,
 ) -> AnchorRef | None:
-    """Find a symbol in the tree and build an AnchorRef for it."""
-    root = tree.root_node
-    target = _find_symbol(root, source, symbol_name)
+    """Build an AnchorRef for a symbol.
+
+    If node is provided, use it directly (deterministic — no search).
+    If symbol_name is provided, search the tree for a matching node.
+    """
+    if node is not None:
+        target: tree_sitter.Node | None = node
+    elif symbol_name is not None:
+        target = _find_symbol(tree.root_node, source, symbol_name)
+    else:
+        return None
+
     if target is None:
         return None
 
     return AnchorRef(
         lang="python",
         file=file_path,
-        symbol_path=_symbol_path(file_path, target, source),
+        symbol_path=symbol_path(file_path, target, source),
         node_kind=target.type,
         node_hash=node_hash(target, source),
     )

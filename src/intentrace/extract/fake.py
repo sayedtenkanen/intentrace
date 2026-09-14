@@ -11,9 +11,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from intentrace.models import Observation, Requirement, Span
-
-from intentrace.models import AnchorRef
+from intentrace.models import AnchorRef, Observation, Requirement, Span
 from intentrace.symbol import Ambiguous, Resolved, SymbolTable
 
 VERSION = "fake-v1"
@@ -29,6 +27,7 @@ class ExtractionResult:
 
     requirements: list[Requirement] = field(default_factory=list)
     ambiguous_symbols: dict[str, list[str]] = field(default_factory=dict)
+
 
 # Normative markers (case-insensitive)
 NORMATIVE_RE = re.compile(
@@ -79,9 +78,7 @@ def _is_normative(sentence: str) -> bool:
     return bool(NORMATIVE_RE.search(sentence))
 
 
-def _resolve_symbols(
-    sentence: str, symbols: SymbolTable
-) -> tuple[list[AnchorRef], list[str]]:
+def _resolve_symbols(sentence: str, symbols: SymbolTable) -> tuple[list[AnchorRef], list[str]]:
     """Resolve symbols mentioned in a sentence against the symbol table.
 
     Returns a tuple of (anchors, ambiguous_names). Only definitive
@@ -172,9 +169,7 @@ class FakeExtractor:
                     for name in ambiguous:
                         if name not in ambiguous_symbols:
                             candidates = symbols.resolve_all(name)
-                            ambiguous_symbols[name] = [
-                                c.symbol_path for c in candidates
-                            ]
+                            ambiguous_symbols[name] = [c.symbol_path for c in candidates]
 
                 requirements.append(
                     Requirement.create(
