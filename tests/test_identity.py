@@ -61,9 +61,9 @@ def test_two_runs_identical_requirements() -> None:
         text="The system must handle errors gracefully.",
     )
     extractor = FakeExtractor()
-    reqs1 = extractor.extract([obs])
-    reqs2 = extractor.extract([obs])
-    assert len(reqs1) == len(reqs2)
-    for r1, r2 in zip(reqs1, reqs2, strict=True):
+    result1 = extractor.extract([obs])
+    result2 = extractor.extract([obs])
+    assert len(result1.requirements) == len(result2.requirements)
+    for r1, r2 in zip(result1.requirements, result2.requirements, strict=True):
         assert r1.req_id == r2.req_id
         assert r1.statement == r2.statement

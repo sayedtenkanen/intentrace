@@ -19,16 +19,17 @@ def test_deterministic_output(extractor: FakeExtractor) -> None:
     obs = Observation.create(
         session_id="s1", turn_index=0, kind="prompt", text="The system must handle errors."
     )
-    reqs1 = extractor.extract([obs])
-    reqs2 = extractor.extract([obs])
-    assert [r.req_id for r in reqs1] == [r.req_id for r in reqs2]
+    r1 = extractor.extract([obs])
+    r2 = extractor.extract([obs])
+    assert [r.req_id for r in r1.requirements] == [r.req_id for r in r2.requirements]
 
 
 def test_provenance_span_exact(extractor: FakeExtractor) -> None:
     """Provenance spans, sliced out of source text, exactly reproduce the statement."""
     text = "The system must handle errors gracefully."
     obs = Observation.create(session_id="s1", turn_index=0, kind="prompt", text=text)
-    reqs = extractor.extract([obs])
+    result = extractor.extract([obs])
+    reqs = result.requirements
     assert len(reqs) == 1
 
     req = reqs[0]
@@ -49,8 +50,8 @@ def test_no_normative_marker_no_candidates(extractor: FakeExtractor) -> None:
         kind="prompt",
         text="Please add a retry mechanism to the error handler.",
     )
-    reqs = extractor.extract([obs])
-    assert len(reqs) == 0
+    result = extractor.extract([obs])
+    assert len(result.requirements) == 0
 
 
 def test_only_prompts(extractor: FakeExtractor) -> None:
@@ -58,8 +59,8 @@ def test_only_prompts(extractor: FakeExtractor) -> None:
     obs = Observation.create(
         session_id="s1", turn_index=0, kind="tool_result", text="The system must handle errors."
     )
-    reqs = extractor.extract([obs])
-    assert len(reqs) == 0
+    result = extractor.extract([obs])
+    assert len(result.requirements) == 0
 
 
 def test_multiple_sentences(extractor: FakeExtractor) -> None:
@@ -70,8 +71,8 @@ def test_multiple_sentences(extractor: FakeExtractor) -> None:
         kind="prompt",
         text="Errors must be logged. The system should never crash silently.",
     )
-    reqs = extractor.extract([obs])
-    assert len(reqs) == 2
+    result = extractor.extract([obs])
+    assert len(result.requirements) == 2
 
 
 def test_i9_empty_provenance_raises() -> None:
@@ -122,7 +123,8 @@ def test_provenance_corresponds_to_statement() -> None:
             observations.append(Observation.model_validate(data))
 
     extractor = FakeExtractor()
-    requirements = extractor.extract(observations)
+    result = extractor.extract(observations)
+    requirements = result.requirements
 
     # Build observation lookup
     obs_map = {obs.obs_id: obs for obs in observations}
@@ -158,7 +160,8 @@ def test_quoted_slice_has_no_surrounding_whitespace() -> None:
             observations.append(Observation.model_validate(data))
 
     extractor = FakeExtractor()
-    requirements = extractor.extract(observations)
+    result = extractor.extract(observations)
+    requirements = result.requirements
 
     obs_map = {obs.obs_id: obs for obs in observations}
 
@@ -183,7 +186,8 @@ def test_stored_statement_preserves_case_and_punctuation() -> None:
         text="The system MUST expose stack traces to the user.",
     )
     extractor = FakeExtractor()
-    reqs = extractor.extract([obs])
+    result = extractor.extract([obs])
+    reqs = result.requirements
     assert len(reqs) == 1
     req = reqs[0]
     # Stored statement must preserve original case and punctuation
