@@ -705,7 +705,7 @@ def test_ratify_accepts_r_prefix_form(tmp_path: Path) -> None:
 
 
 def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
-    """M3: multi-anchor drift lines print in the same order under any hash seed."""
+    """M3/C3: drift lines print in path order under any hash seed, both loops."""
     import os
 
     script = (
@@ -713,21 +713,24 @@ def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
         "from intentrace.models import AnchorRef, Ratification, Requirement, Span;"
         "import datetime;"
         "paths = ['app.py::zeta', 'app.py::alpha'];"
-        "req = Requirement(req_id='x', statement='s', origin='declared',"
-        " maturity='active', provenance=[Span(obs_id='o', start=0, end=1)],"
+        "mk = lambda ps, base: Requirement(req_id='x', statement='s',"
+        " origin='declared', maturity='active',"
+        " provenance=[Span(obs_id='o', start=0, end=1)],"
         " derivation={'extractor_version': 'v',"
         " 'timestamp': '2026-01-01T00:00:00Z'},"
         " anchors=[AnchorRef(lang='python', file='app.py', symbol_path=p,"
-        " node_kind='function_definition', node_hash='0' * 64) for p in paths],"
+        " node_kind='function_definition', node_hash='0' * 64) for p in ps],"
         " ratification=Ratification(actor='t',"
-        " timestamp=datetime.datetime(2026, 1, 1),"
-        " baseline_hashes={p: '1' * 64 for p in paths}));"
+        " timestamp=datetime.datetime(2026, 1, 1), baseline_hashes=base));"
         "from intentrace.symbol import SymbolTable;"
         "t = SymbolTable();"
         "[t.by_qualified.update({p: AnchorRef(lang='python', file='app.py',"
         " symbol_path=p, node_kind='function_definition',"
         " node_hash='2' * 64)}) for p in paths];"
-        "print([d.symbol_path for d in judge_requirement(req, t).anchors])"
+        "r1 = mk(paths, {p: '1' * 64 for p in paths});"
+        "r2 = mk([], {'app.py::zeta': '2' * 64, 'app.py::alpha': '2' * 64});"
+        "print([d.symbol_path for d in judge_requirement(r1, t).anchors]);"
+        "print([d.symbol_path for d in judge_requirement(r2, t).anchors])"
     )
     outputs = set()
     for seed in ("0", "1", "2"):
@@ -742,7 +745,9 @@ def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
         assert result.returncode == 0, result.stderr
         outputs.add(result.stdout.strip())
     assert len(outputs) == 1
-    assert outputs.pop() == "['app.py::alpha', 'app.py::zeta']"
+    assert outputs.pop() == (
+        "['app.py::alpha', 'app.py::zeta']\n['app.py::alpha', 'app.py::zeta']"
+    )
 
 
 # Slice 2 review follow-ups.

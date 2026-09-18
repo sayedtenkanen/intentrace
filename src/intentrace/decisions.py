@@ -181,7 +181,7 @@ def judge_requirement(req: Requirement, symbols: SymbolTable) -> ReqVerdict:
         elif base is not None and current.node_hash != base:
             details.append(AnchorVerdict(path, "changed", base, current.node_hash))
 
-    for path, base in baseline.items():
+    for path, base in sorted(baseline.items()):
         if path in current_paths:
             continue
         current = symbols.by_qualified.get(path)

@@ -51,6 +51,10 @@ file is the public record of what each slice actually delivered.
 - Remediation: drift detail lines sorted (deterministic output), stale refusal
   asserts presentation, `R-` input form tested, anchorless-active surfacing tested;
   uncovered CLI branches covered, weak assertions strengthened, cleanup applied.
+- Review follow-ups: record-time re-read rejects concurrent ratification (no file
+  lock — closes the prompt-scale window, not microsecond TOCTOU); freshness
+  re-extracts, so newly ambiguous/detached/newly attached anchors are stale;
+  baseline-only verdict details sorted.
 
 **Still incomplete (by design)**
 
