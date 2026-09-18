@@ -67,6 +67,22 @@ class SymbolTable:
             return Resolved(anchor=candidates[0])
         return Ambiguous(candidates=tuple(candidates))
 
-    def resolve_all(self, name: str) -> list[AnchorRef]:
-        """Return all candidates for a bare name (for ambiguity reporting)."""
-        return self.by_bare.get(name, [])
+    def resolve_qualified(self, class_name: str, method_name: str) -> Resolution:
+        """Resolve a Class.method reference from a sentence.
+
+        Matches qualified paths ending in ::Class::method, so naming the
+        class resolves deterministically even when the bare method name is
+        ambiguous. The leading :: in the match keeps partial class names
+        from matching (AA never matches A). Candidates are sorted by path
+        so ambiguity reports are deterministic.
+        """
+        suffix = f"::{class_name}::{method_name}"
+        candidates = sorted(
+            (a for a in self.by_qualified.values() if a.symbol_path.endswith(suffix)),
+            key=lambda a: a.symbol_path,
+        )
+        if len(candidates) == 0:
+            return NotFound()
+        if len(candidates) == 1:
+            return Resolved(anchor=candidates[0])
+        return Ambiguous(candidates=tuple(candidates))

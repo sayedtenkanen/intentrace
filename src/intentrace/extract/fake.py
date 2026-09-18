@@ -12,7 +12,7 @@ from collections.abc import Iterable
 
 from intentrace.extract.port import ExtractionResult
 from intentrace.models import AnchorRef, Observation, Requirement, Span
-from intentrace.symbol import Ambiguous, Resolved, SymbolTable
+from intentrace.symbol import Ambiguous, NotFound, Resolved, SymbolTable
 
 VERSION = "fake-v1"
 
@@ -66,26 +66,34 @@ def _is_normative(sentence: str) -> bool:
     return bool(NORMATIVE_RE.search(sentence))
 
 
-def _resolve_symbols(sentence: str, symbols: SymbolTable) -> tuple[list[AnchorRef], list[str]]:
+def _resolve_symbols(
+    sentence: str, symbols: SymbolTable
+) -> tuple[list[AnchorRef], list[tuple[str, list[AnchorRef]]]]:
     """Resolve symbols mentioned in a sentence against the symbol table.
 
-    Returns a tuple of (anchors, ambiguous_names). Only definitive
-    (unambiguous) resolutions are returned as anchors. Ambiguous
-    names are collected for reporting — guessing is an I4-class failure.
+    Returns a tuple of (anchors, ambiguous). Only definitive
+    (unambiguous) resolutions are returned as anchors. Each ambiguous
+    entry carries the bare name plus the exact candidates that matched,
+    so the report names what the sentence pointed at — guessing is an
+    I4-class failure.
     """
     anchors: list[AnchorRef] = []
-    ambiguous_names: list[str] = []
+    ambiguous: list[tuple[str, list[AnchorRef]]] = []
     seen: set[str] = set()
 
-    # Try Class.method first — look up by bare method name
+    # Try Class.method first — resolve through the qualified path so the
+    # named class wins over same-named methods elsewhere. Only when no
+    # such class exists, fall back to the bare method name.
     for match in CLASS_METHOD_RE.finditer(sentence):
-        _class_name, method_name = match.groups()
-        resolution = symbols.resolve(method_name)
+        class_name, method_name = match.groups()
+        resolution = symbols.resolve_qualified(class_name, method_name)
+        if isinstance(resolution, NotFound):
+            resolution = symbols.resolve(method_name)
         if isinstance(resolution, Resolved) and method_name not in seen:
             anchors.append(resolution.anchor)
             seen.add(method_name)
         elif isinstance(resolution, Ambiguous) and method_name not in seen:
-            ambiguous_names.append(method_name)
+            ambiguous.append((method_name, list(resolution.candidates)))
             seen.add(method_name)
 
     # Try standalone words — only definitive resolutions
@@ -98,10 +106,10 @@ def _resolve_symbols(sentence: str, symbols: SymbolTable) -> tuple[list[AnchorRe
             anchors.append(resolution.anchor)
             seen.add(word)
         elif isinstance(resolution, Ambiguous):
-            ambiguous_names.append(word)
+            ambiguous.append((word, list(resolution.candidates)))
             seen.add(word)
 
-    return anchors, ambiguous_names
+    return anchors, ambiguous
 
 
 def _normalize_statement(text: str) -> str:
@@ -159,9 +167,8 @@ class FakeExtractor:
                 anchors: list[AnchorRef] = []
                 if symbols:
                     anchors, ambiguous = _resolve_symbols(sentence_text, symbols)
-                    for name in ambiguous:
+                    for name, candidates in ambiguous:
                         if name not in ambiguous_symbols:
-                            candidates = symbols.resolve_all(name)
                             ambiguous_symbols[name] = [c.symbol_path for c in candidates]
                     if ambiguous:
                         anchors = []

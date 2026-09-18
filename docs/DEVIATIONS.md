@@ -84,3 +84,26 @@ identical symbol paths, breaking the anchor model.
 
 **Why:** Per the spec, symbol paths must be unique across the repo. Directory
 components are required for disambiguation.
+
+---
+
+## D4 — Sentence splitter tears `Class.method` references apart
+
+**Date:** 2026-09-18
+**Brief section:** §5.3 Extractor (anchor target: `word`, `word.word`, `Class.method`)
+
+`_split_sentences` splits on every `.`, so a `Class.method` reference never survives
+to resolution intact: "The Alpha.attempt function must retry." becomes "The Alpha."
+(skipped, no normative marker) and "attempt function must retry." (bare-name lookup).
+The `CLASS_METHOD_RE` branch in `_resolve_symbols` is therefore unreachable through
+`extract()` — qualified references silently degrade to bare-name handling.
+
+**What was done instead:** `_resolve_symbols` now resolves `Class.method` through the
+qualified path first (falling back to the bare name), which is correct at the function
+level and pinned by white-box tests — but end to end the splitter still tears the
+reference first.
+
+**Why deferred:** repairing the splitter changes statements and provenance spans, which
+changes `req_id`s. Under the identity design note (§3) that is an extractor behaviour
+change and belongs with an `extractor_version` bump and its migration, not smuggled
+inside a review fix. Owned by a future slice touching extraction.
