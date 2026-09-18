@@ -325,6 +325,14 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print()
 
     sketches = [r for r in view.requirements if r.maturity == "sketch"]
+    unimplemented = [r for r in view.requirements if r.maturity == "active" and not r.anchors]
+    if unimplemented:
+        # Informational only: these are obligations with no code location,
+        # so `why` cannot attach them anywhere and they are never queue items.
+        print("active requirements with no anchors (unimplemented — nothing to ratify):")
+        for r in unimplemented:
+            print(f'  R-{r.req_id[:8]} "{r.statement}"')
+        print()
     if not sketches:
         print("nothing to settle — no unratified sketches")
         return 0

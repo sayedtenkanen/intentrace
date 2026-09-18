@@ -27,7 +27,14 @@ file is the public record of what each slice actually delivered.
   the earliest ratify; fresh extraction is a sketch until decisions replay.
 - **Freshness (I3)**: `check_fresh` refuses proposals whose anchors changed or
   vanished since display, carrying the re-derived anchors so the CLI presents the
-  current candidate instead of recording.
+  current candidate instead of recording. Window this covers: the check compares the
+  display-time table against the record-time table within one invocation (seconds).
+  Sketches are not persisted, so there is no older proposal moment to be stale
+  against — a days-old proposal the human remembers is outside what the tool can see.
+- **Active-unimplemented requirements surface in `settle`.** A ratified anchorless
+  requirement has no code location, so `why` cannot attach it anywhere (it reports
+  "no intent covers this code" for want of a location, not want of intent). `settle`
+  lists such requirements informationally; they are never queue items.
 - **Drift verdicts in `why`**: active requirements judge each baseline path against
   current code — `unverified`, `unconfirmed` (naming baseline and current hashes),
   `orphaned` (symbol gone), `unimplemented` (ratified with no anchors). When nothing
@@ -41,6 +48,8 @@ file is the public record of what each slice actually delivered.
   the port so the interface no longer lies about its return type.
 - 68 tests (13 new, including planted-drift-caught and refactor-no-false-drift,
   written before the code); ruff and `mypy --strict` clean.
+- Remediation: drift detail lines sorted (deterministic output), stale refusal
+  asserts presentation, `R-` input form tested, anchorless-active surfacing tested.
 
 **Still incomplete (by design)**
 

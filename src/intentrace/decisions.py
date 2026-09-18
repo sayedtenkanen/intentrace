@@ -143,7 +143,7 @@ def judge_requirement(req: Requirement, symbols: SymbolTable) -> ReqVerdict:
     current_paths = {a.symbol_path for a in req.anchors}
     details: list[AnchorVerdict] = []
 
-    for path in current_paths:
+    for path in sorted(current_paths):
         current = symbols.by_qualified.get(path)
         base = baseline.get(path)
         if current is None:

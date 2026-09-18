@@ -241,7 +241,7 @@ def test_freshness_refusal_represents_candidate(tmp_path: Path) -> None:
 
 
 def test_ratify_cli_refuses_stale_proposal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """End to end: code changed between proposal display and record is refused."""
     import intentrace.cli as cli
@@ -271,6 +271,10 @@ def test_ratify_cli_refuses_stale_proposal(
     rc = cli.cmd_ratify(args)
     assert rc == 1
     assert len(MemoryStore(repo).all_decisions) == 0
+    out, _ = capsys.readouterr()
+    assert "cannot ratify" in out
+    assert "Re-derived candidate:" in out
+    assert "R-" in out, "expected the re-derived candidate block"
 
 
 def test_orphaned_decision_is_reported(tmp_path: Path) -> None:
@@ -407,3 +411,111 @@ def test_no_bulk_ratify_flag() -> None:
         )
         assert result.returncode == 0
         assert "--all" not in result.stdout
+
+
+# Slice 2 remediation, commit 1.
+
+
+ANCHORLESS_TEXT = "The system must never lose data."
+
+
+def test_active_unimplemented_is_surfaced_in_settle(tmp_path: Path) -> None:
+    """M1: a ratified anchorless requirement is shown, not silently dropped."""
+    from intentrace.decisions import apply_decisions, judge_requirement
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import append_observation, read_observations
+    from intentrace.models import Observation
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import build_symbol_table
+
+    (tmp_path / ".intentrace").mkdir()
+    (tmp_path / "app.py").write_text(CODE_V1)
+    obs = Observation.create(session_id="s1", turn_index=0, kind="prompt", text=ANCHORLESS_TEXT)
+    append_observation(tmp_path, obs)
+
+    symbols = build_symbol_table(tmp_path)
+    reqs = (
+        FakeExtractor()
+        .extract(read_observations(tmp_path).observations, symbols=symbols)
+        .requirements
+    )
+    assert len(reqs) == 1
+    assert reqs[0].anchors == []
+    req_id = reqs[0].req_id
+
+    assert ratify_cli(tmp_path, req_id).returncode == 0
+
+    store = MemoryStore(tmp_path)
+    view = apply_decisions(
+        FakeExtractor()
+        .extract(store.all_observations, symbols=build_symbol_table(tmp_path))
+        .requirements,
+        store.all_decisions,
+    )
+    assert view.requirements[0].maturity == "active"
+    assert judge_requirement(view.requirements[0], symbols).status == "unimplemented"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "intentrace.cli", "settle"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        input="",
+    )
+    assert result.returncode == 0
+    assert "R-" in result.stdout, "expected a populated requirement block"
+    assert "unimplemented" in result.stdout
+    assert req_id[:8] in result.stdout
+
+
+def test_ratify_accepts_r_prefix_form(tmp_path: Path) -> None:
+    """M4: ratify accepts the R-xxxxxxxx display form as input."""
+    from intentrace.store import MemoryStore
+
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    result = ratify_cli(repo, f"R-{req_id[:8]}")
+    assert result.returncode == 0, result.stderr
+    assert "ratified" in result.stdout
+    assert len(MemoryStore(repo).get_decisions(req_id)) == 1
+
+
+def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
+    """M3: multi-anchor drift lines print in the same order under any hash seed."""
+    import os
+
+    script = (
+        "from intentrace.decisions import judge_requirement;"
+        "from intentrace.models import AnchorRef, Ratification, Requirement, Span;"
+        "import datetime;"
+        "paths = ['app.py::zeta', 'app.py::alpha'];"
+        "req = Requirement(req_id='x', statement='s', origin='declared',"
+        " maturity='active', provenance=[Span(obs_id='o', start=0, end=1)],"
+        " derivation={'extractor_version': 'v',"
+        " 'timestamp': '2026-01-01T00:00:00Z'},"
+        " anchors=[AnchorRef(lang='python', file='app.py', symbol_path=p,"
+        " node_kind='function_definition', node_hash='0' * 64) for p in paths],"
+        " ratification=Ratification(actor='t',"
+        " timestamp=datetime.datetime(2026, 1, 1),"
+        " baseline_hashes={p: '1' * 64 for p in paths}));"
+        "from intentrace.symbol import SymbolTable;"
+        "t = SymbolTable();"
+        "[t.by_qualified.update({p: AnchorRef(lang='python', file='app.py',"
+        " symbol_path=p, node_kind='function_definition',"
+        " node_hash='2' * 64)}) for p in paths];"
+        "print([d.symbol_path for d in judge_requirement(req, t).anchors])"
+    )
+    outputs = set()
+    for seed in ("0", "1", "2"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        outputs.add(result.stdout.strip())
+    assert len(outputs) == 1
+    assert outputs.pop() == "['app.py::alpha', 'app.py::zeta']"
