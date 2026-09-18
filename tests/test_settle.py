@@ -41,7 +41,7 @@ CODE_V3_REFACTOR = (
     "def total(items):\n"
     '    """Return the sum of the items given."""\n'
     "    # totals must stay exact; this comment changes nothing\n"
-    "    return sum(items)\n"
+    "    return  sum(items)\n"
     "\n"
     "\n"
     "def assistant():\n"
@@ -201,6 +201,7 @@ def test_ratify_unknown_id_errors(tmp_path: Path) -> None:
     before = log_line_count(repo)
     result = ratify_cli(repo, "deadbeef")
     assert result.returncode != 0
+    assert "no sketch" in result.stderr
     assert log_line_count(repo) == before
 
 
@@ -292,8 +293,9 @@ def test_orphaned_decision_is_reported(tmp_path: Path) -> None:
     )
     append_decision(repo, ghost)
 
+    live_id = extract_first_req_id(repo)
     store = MemoryStore(repo)
-    orphaned = store.orphaned_decisions({"whatever-is-current"})
+    orphaned = store.orphaned_decisions({live_id})
     assert [d.req_id for d in orphaned] == ["f" * 64]
 
     # Settle surfaces it instead of dropping it.
@@ -386,6 +388,21 @@ def test_settle_ratifies_one_at_a_time(tmp_path: Path) -> None:
     )
     append_observation(tmp_path, obs)
 
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import read_observations
+    from intentrace.symbol import build_symbol_table
+
+    first, second = (
+        FakeExtractor()
+        .extract(
+            read_observations(tmp_path).observations,
+            symbols=build_symbol_table(tmp_path),
+        )
+        .requirements
+    )
+    assert first.statement.startswith("The total")
+    assert second.statement.startswith("The helper")
+
     result = subprocess.run(
         [sys.executable, "-m", "intentrace.cli", "settle", "--actor", "tester"],
         capture_output=True,
@@ -398,6 +415,8 @@ def test_settle_ratifies_one_at_a_time(tmp_path: Path) -> None:
 
     store = MemoryStore(tmp_path)
     assert len(store.all_decisions) == 1
+    assert [d.req_id for d in store.get_decisions(first.req_id)] == [first.req_id]
+    assert store.get_decisions(second.req_id) == []
 
 
 def test_no_bulk_ratify_flag() -> None:
@@ -413,7 +432,147 @@ def test_no_bulk_ratify_flag() -> None:
         assert "--all" not in result.stdout
 
 
-# Slice 2 remediation, commit 1.
+# Slice 2 remediation — follow-up tests (commits 1 and 2).
+
+
+def test_ratify_decline_appends_nothing(tmp_path: Path) -> None:
+    """T2: answering no at the confirmation records nothing."""
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    before = log_line_count(repo)
+    result = subprocess.run(
+        [sys.executable, "-m", "intentrace.cli", "ratify", req_id, "--actor", "tester"],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        input="n\n",
+    )
+    assert result.returncode == 0
+    assert "not ratified" in result.stdout
+    assert log_line_count(repo) == before
+
+
+def test_match_req_id_forms() -> None:
+    """T2: exact wins, prefixes match, ambiguity and R- form behave."""
+    from intentrace.decisions import match_req_id
+    from intentrace.models import Requirement, Span
+
+    def req(rid: str) -> Requirement:
+        return Requirement(
+            req_id=rid,
+            statement="s",
+            origin="declared",
+            maturity="sketch",
+            provenance=[Span(obs_id="o", start=0, end=1)],
+            derivation={"extractor_version": "v", "timestamp": "2026-01-01T00:00:00Z"},
+            anchors=[],
+        )
+
+    reqs = [req("a" * 64), req("ab" + "0" * 62)]
+    assert [r.req_id for r in match_req_id("a" * 64, reqs)] == ["a" * 64]
+    assert [r.req_id for r in match_req_id("ab", reqs)] == ["ab" + "0" * 62]
+    assert len(match_req_id("a", reqs)) == 2
+    assert match_req_id("ff", reqs) == []
+    assert [r.req_id for r in match_req_id("R-ab", reqs)] == ["ab" + "0" * 62]
+
+
+def test_ratify_ambiguous_prefix_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T2: a prefix matching two requirements is an error, not a guess."""
+    import argparse
+
+    import intentrace.cli as cli
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import read_observations
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path)
+    table = build_symbol_table(repo)
+    req = (
+        FakeExtractor()
+        .extract(read_observations(repo).observations, symbols=table)
+        .requirements[0]
+    )
+    monkeypatch.setattr(cli, "match_req_id", lambda _prefix, _reqs: [req, req])
+    monkeypatch.chdir(repo)
+
+    rc = cli.cmd_ratify(argparse.Namespace(req_id="a", actor="tester"))
+    assert rc == 1
+    _, err = capsys.readouterr()
+    assert "be more specific" in err
+    assert len(MemoryStore(repo).all_decisions) == 0
+
+
+def test_settle_stale_skips_and_represents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T2: code changed mid-settle is skipped with the fresh candidate shown."""
+    import argparse
+
+    import intentrace.cli as cli
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path)
+    table_v1 = build_symbol_table(repo)
+    (repo / "app.py").write_text(CODE_V2_DRIFT)
+    table_v2 = build_symbol_table(repo)
+
+    calls = iter([table_v1, table_v2])
+    monkeypatch.setattr(cli, "build_symbol_table", lambda _root: next(calls))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    monkeypatch.chdir(repo)
+
+    rc = cli.cmd_settle(argparse.Namespace(actor="tester"))
+    assert rc == 0
+    out, _ = capsys.readouterr()
+    assert "Re-derived candidate:" in out
+    assert "0 ratified, 1 skipped" in out
+    assert len(MemoryStore(repo).all_decisions) == 0
+
+
+def test_why_shows_orphaned_decision_fallback(tmp_path: Path) -> None:
+    """T2: an orphaned decision about this file surfaces in why, not a miss."""
+    from intentrace.log import append_decision
+    from intentrace.models import Decision
+
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    assert ratify_cli(repo, req_id).returncode == 0
+    ghost = Decision.create(
+        kind="ratify",
+        req_id="e" * 64,
+        actor="tester",
+        baseline_hashes={"app.py::vanished": "9" * 64},
+    )
+    append_decision(repo, ghost)
+
+    (repo / "app.py").write_text('"""Billing helpers."""\n\n\ndef helper():\n    return 0\n')
+
+    out = why_cli(repo, "app.py:5")
+    assert out.returncode == 0
+    assert "R-" in out.stdout, "expected a populated requirement block"
+    assert "orphaned" in out.stdout
+    assert "eeeeeeee" in out.stdout
+
+
+def test_why_shows_detached_anchor(tmp_path: Path) -> None:
+    """T2: code unchanged but no longer attached reads unconfirmed, not clean."""
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    assert ratify_cli(repo, req_id).returncode == 0
+
+    # A second `total` elsewhere makes the bare name ambiguous, so the
+    # extractor drops the anchor without any behaviour changing here.
+    (repo / "other.py").write_text("def total(items):\n    return sum(items)\n")
+
+    out = why_cli(repo, "app.py:6")
+    assert out.returncode == 0
+    assert "R-" in out.stdout, "expected a populated requirement block"
+    assert "unconfirmed" in out.stdout
+    assert "no longer attached" in out.stdout
 
 
 ANCHORLESS_TEXT = "The system must never lose data."
