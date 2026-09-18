@@ -10,9 +10,12 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+from intentrace.extract.port import ExtractionResult
 from intentrace.models import AnchorRef, Observation, Requirement, Span
+from intentrace.symbol import Ambiguous, NotFound, Resolved, SymbolTable
 
 VERSION = "fake-v1"
+
 
 # Normative markers (case-insensitive)
 NORMATIVE_RE = re.compile(
@@ -63,26 +66,50 @@ def _is_normative(sentence: str) -> bool:
     return bool(NORMATIVE_RE.search(sentence))
 
 
-def _resolve_symbols(sentence: str, symbols: dict[str, AnchorRef]) -> list[AnchorRef]:
-    """Resolve symbols mentioned in a sentence against the symbol table."""
+def _resolve_symbols(
+    sentence: str, symbols: SymbolTable
+) -> tuple[list[AnchorRef], list[tuple[str, list[AnchorRef]]]]:
+    """Resolve symbols mentioned in a sentence against the symbol table.
+
+    Returns a tuple of (anchors, ambiguous). Only definitive
+    (unambiguous) resolutions are returned as anchors. Each ambiguous
+    entry carries the bare name plus the exact candidates that matched,
+    so the report names what the sentence pointed at — guessing is an
+    I4-class failure.
+    """
     anchors: list[AnchorRef] = []
+    ambiguous: list[tuple[str, list[AnchorRef]]] = []
     seen: set[str] = set()
 
-    # Try Class.method first
+    # Try Class.method first — resolve through the qualified path so the
+    # named class wins over same-named methods elsewhere. Only when no
+    # such class exists, fall back to the bare method name.
     for match in CLASS_METHOD_RE.finditer(sentence):
-        _class_name, method_name = match.groups()
-        if method_name in symbols and method_name not in seen:
-            anchors.append(symbols[method_name])
+        class_name, method_name = match.groups()
+        resolution = symbols.resolve_qualified(class_name, method_name)
+        if isinstance(resolution, NotFound):
+            resolution = symbols.resolve(method_name)
+        if isinstance(resolution, Resolved) and method_name not in seen:
+            anchors.append(resolution.anchor)
+            seen.add(method_name)
+        elif isinstance(resolution, Ambiguous) and method_name not in seen:
+            ambiguous.append((method_name, list(resolution.candidates)))
             seen.add(method_name)
 
-    # Try standalone words
+    # Try standalone words — only definitive resolutions
     for match in WORD_RE.finditer(sentence):
         word = match.group(1)
-        if word not in SKIP_WORDS and word not in seen and word in symbols:
-            anchors.append(symbols[word])
+        if word in SKIP_WORDS or word in seen:
+            continue
+        resolution = symbols.resolve(word)
+        if isinstance(resolution, Resolved):
+            anchors.append(resolution.anchor)
+            seen.add(word)
+        elif isinstance(resolution, Ambiguous):
+            ambiguous.append((word, list(resolution.candidates)))
             seen.add(word)
 
-    return anchors
+    return anchors, ambiguous
 
 
 def _normalize_statement(text: str) -> str:
@@ -98,17 +125,22 @@ class FakeExtractor:
     def extract(
         self,
         observations: Iterable[Observation],
-        symbols: dict[str, AnchorRef] | None = None,
-    ) -> list[Requirement]:
+        symbols: SymbolTable | None = None,
+    ) -> ExtractionResult:
         """Extract requirements from prompt observations.
 
         Args:
             observations: The observations to extract from.
-            symbols: Optional mapping of symbol names to their AnchorRefs.
-                     When provided, symbols mentioned in sentences are resolved
-                     and anchors attached at extraction time.
+            symbols: Optional symbol table for anchor resolution.
+                     When provided, unambiguous symbols mentioned in sentences
+                     are resolved and anchors attached at extraction time.
+                     Ambiguous names are reported, not guessed (I4). If any
+                     mentioned symbol is ambiguous, the requirement stays
+                     unanchored: a partially anchored requirement would
+                     present unsettled code targets as settled.
         """
         requirements: list[Requirement] = []
+        ambiguous_symbols: dict[str, list[str]] = {}
 
         for obs in observations:
             if obs.kind != "prompt":
@@ -117,17 +149,29 @@ class FakeExtractor:
             text = obs.text
             sentences = _split_sentences(text)
 
-            for sentence_text, start, end in sentences:
+            for sentence_text, raw_start, _raw_end in sentences:
                 if not _is_normative(sentence_text):
                     continue
 
                 normalized = _normalize_statement(sentence_text)
-                provenance = [Span(obs_id=obs.obs_id, start=start, end=end)]
 
-                # Resolve anchors from the symbol table
+                # Tighten span to stripped bounds: find where the stripped
+                # text actually starts and ends in the original observation.
+                stripped_start = text.find(sentence_text, raw_start)
+                stripped_end = stripped_start + len(sentence_text)
+                provenance = [Span(obs_id=obs.obs_id, start=stripped_start, end=stripped_end)]
+
+                # Resolve anchors from the symbol table. All-or-nothing per
+                # sentence: any ambiguity drops every anchor for the
+                # requirement (see docstring).
                 anchors: list[AnchorRef] = []
                 if symbols:
-                    anchors = _resolve_symbols(sentence_text, symbols)
+                    anchors, ambiguous = _resolve_symbols(sentence_text, symbols)
+                    for name, candidates in ambiguous:
+                        if name not in ambiguous_symbols:
+                            ambiguous_symbols[name] = [c.symbol_path for c in candidates]
+                    if ambiguous:
+                        anchors = []
 
                 requirements.append(
                     Requirement.create(
@@ -138,16 +182,20 @@ class FakeExtractor:
                     )
                 )
 
-        return requirements
+        return ExtractionResult(
+            requirements=requirements,
+            ambiguous_symbols=ambiguous_symbols,
+        )
 
 
 def _split_sentences(text: str) -> list[tuple[str, int, int]]:
     """Split text into (sentence, start_offset, end_offset) tuples.
 
     Uses a simple approach: split on sentence-ending punctuation,
-    keeping track of char offsets. Offsets refer to the unstripped
-    segment boundaries so that text[start:end] is a valid slice of
-    the original text.
+    keeping track of char offsets. Offsets are unstripped: the returned
+    sentence text is stripped, but start/end are the original boundaries
+    so that text[start:end] is a valid (possibly whitespace-padded) slice.
+    The caller tightens offsets to stripped bounds for provenance spans.
     """
     results: list[tuple[str, int, int]] = []
     current_start = 0

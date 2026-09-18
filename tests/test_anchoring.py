@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from intentrace.anchor.python import (
-    _symbol_path,
     build_anchor,
     node_hash,
     parse_source,
     resolve_line_to_node,
+    symbol_path,
 )
 
 SAMPLE_SOURCE = b"""\
@@ -46,7 +46,7 @@ def test_symbol_path_nested_class_method() -> None:
                                 name
                                 and SAMPLE_SOURCE[name.start_byte : name.end_byte] == b"attempt"
                             ):
-                                path = _symbol_path("retry.py", node, SAMPLE_SOURCE)
+                                path = symbol_path("retry.py", node, SAMPLE_SOURCE)
                                 assert "RetryPolicy" in path
                                 assert "attempt" in path
                                 assert "retry.py::" in path
