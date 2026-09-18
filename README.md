@@ -4,8 +4,10 @@
 > in either order. **intentrace keeps them reconciled, in both directions**, and reports the
 > state of that reconciliation without ever overclaiming.
 
-**Status: design in progress. There is no implementation yet.**
-The artifact in this repository is [`docs/SPEC.md`](docs/SPEC.md).
+**Status: slices 1–2 implemented.** `intentrace why` reports intent covering code,
+`intentrace ratify` / `intentrace settle` record human ratifications with code
+baselines, and `why` reports drift for ratified requirements. No model, no gate yet.
+The artifact behind the implementation is [`docs/SPEC.md`](docs/SPEC.md).
 
 ---
 
@@ -44,7 +46,7 @@ verifying it:
 ```
 $ intentrace why src/retry.py:42
 
-R-18a7663f   sketch · unverified
+R-414282bb   sketch · unverified
   "The attempt function should retry on any exception."
 
   origin     declared
@@ -96,28 +98,33 @@ of the current spec lists what changed between them and which finding forced eac
 
 ## Status and how to run it
 
-Slice 1 is implemented and has been through one review and remediation pass: `intentrace
-why` end to end against a deterministic fake extractor, Python anchoring only, no model and
-no gate. It runs against the bundled fixture:
+Slice 1 (`why` end to end against a deterministic fake extractor) and slice 2 (the
+settle loop: ratification with code baselines, drift verdicts) are implemented and
+have been through review. Python anchoring only, no model and no gate. Against the
+bundled fixture:
 
 ```
 uv sync --extra dev
 uv run intentrace ingest tests/fixtures/sample_project/observations.jsonl
 uv run intentrace why tests/fixtures/sample_project/retry.py:11
+uv run intentrace settle            # ratify or skip sketches one at a time
+uv run intentrace ratify R-414282bb # ratify one requirement (unique prefix works)
+uv run intentrace why tests/fixtures/sample_project/retry.py:11   # now active
 ```
 
-**What it cannot do yet.** Nothing is persisted between runs — requirements are re-derived
-from the log on every invocation and anchors are hashed against the source as it is at that
-moment. So while a stored hash and a fresh hash of changed code do differ, the tool has no
-earlier baseline to compare against and therefore **cannot detect drift across time yet**.
-That arrives with the decision log in slice 2, which is the first slice where a ratification
-gives drift something to be measured from.
+**What it can and cannot do yet.** Drift across time now works for ratified
+requirements: ratification records each anchor's `node_hash`, and `why` compares
+current code against that baseline — a changed body reports `unconfirmed` naming
+both hashes, a vanished symbol reports `orphaned`, anything else stays
+`unverified`. What is still missing: no evidence and therefore no `satisfied` or
+`locked` states, no CI gate, no cross-cutting requirements (scope predicates),
+Python only, and migration is specified but not executed.
 
 Divergences from the slice brief are recorded in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md),
 and per-slice status in [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
-Seven decisions are open and marked as such in §16 of the spec, including requirement
-identity under re-derivation and diff attribution across concurrent agent sessions.
+Six decisions are open and marked as such in §16 of the spec, including diff
+attribution across concurrent agent sessions.
 
 ## Prior art and neighbours
 
