@@ -9,6 +9,32 @@ wrong is still zero.
 
 ---
 
+## 0. Identity is per utterance (slice 2 addendum)
+
+**Decision:** `req_id` includes the provenance spans, and the statement is a verbatim
+slice of those spans. Therefore identity is **per utterance** by construction: the same
+intent stated in two different prompts is always two requirements, permanently.
+
+This is deliberate, not a limitation to work around at the identity level. Two utterances
+are two distinct human acts with distinct provenance; merging them would destroy the
+provenance that justifies each one (I9). If de-duplication is ever wanted, it lives at the
+*queue* level — grouping by normalized statement when presenting sketches to the human —
+never at the identity level, where a merge would silently rebind distinct decisions (I1).
+
+**Consequence:** statement normalization (§2) cannot currently change any outcome. The
+extractor slices statements verbatim from provenance spans, so two requirements with
+identical normalized statements still differ in provenance and therefore in `req_id`.
+Normalization becomes live only when an extractor paraphrases rather than slices — at
+which point two different wordings of one span could collide by design.
+
+**What this forbids:**
+- Treating two requirements with the same normalized statement as the same requirement.
+  Same words, different utterances, different requirements.
+- Deduplicating at the identity level. Grouping is a presentation concern for the queue,
+  not a property of `req_id`.
+
+---
+
 ## 1. What is inside `req_id`?
 
 **Decision:** `req_id` is a content hash of:
