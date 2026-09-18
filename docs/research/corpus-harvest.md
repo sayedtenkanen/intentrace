@@ -1,14 +1,69 @@
 # Corpus harvest — FakeExtractor against real transcripts
 
 **Status:** experiment, not a slice. Deliverable is evidence. No file under `src/`
-was modified; the extractor code is untouched. Pipeline: `tools/harvest.py`
-(seed `20260918`). This document contains aggregate statistics only — no prompt
-text, no transcript content. Labelling was done by the implementing agent, so the
-precision figure is an **agent estimate, not ground truth**.
+was modified; the extractor code is untouched. Pipeline: `tools/harvest.py`.
+This document contains aggregate statistics only — no prompt
+text, no transcript content. Labelling was done by the implementing agent, so all
+label-derived figures are **agent estimates, not ground truth**.
 
 Scope approvals: `pr-review-machine` sessions approved first; all turns within
-them approved second (those sessions also worked in other checkouts). Two scope
+them approved second (those sessions also worked in other checkouts). Pass 2
+corpus (auto-harnessessing histories) approved third. Three scope
 questions were asked and answered before any file content was read.
+
+---
+
+## Pass 1 (intact — see below; unedited since publication)
+
+---
+
+## Pass 2 — recall, and a second corpus
+
+### Pass 2 corpus (file inventory only; no file opened yet)
+
+| Sessions dir | Files | Sizes (bytes) | mtimes |
+|---|---|---|---|
+| auto-harnessessing | 5 session files | 201K–1.3M | Jul 9 – Sep 19 |
+| …--great-vaughan (worktree) | 1 session file | — | — |
+| …--loving-gould (worktree) | 1 session file | — | — |
+| pr-review-machine (pass 1) | 2 session files | — | Jul–Sep |
+
+(Session / prompt / range table follows after parsing; counts are metadata,
+gathered after the rubric commit.)
+
+### Pass 2 recall rubric (written before viewing any new prompt)
+
+Recall asks "does this text contain durable intent" — a different judgement
+about different objects than precision's "is this candidate durable".
+
+- **contains-durable-intent** — The text states at least one constraint on
+  system behavior that should hold beyond the current task and would be worth
+  re-checking later. (Invented positive: "Retries must back off
+  exponentially, never hammer the server." / "The cache must never serve
+  stale entries after invalidation.")
+- **no-durable-intent** — The text carries no such constraint: acknowledgements,
+  questions with no stance, bare imperatives to do something now ("fix the
+  typo", "go ahead" — invented negatives), pasted non-normative material, a
+  fragment stating no complete constraint (same fragment rule as pass 1).
+
+Units and pre-registered rules:
+
+- **A1 (short prompts):** the whole prompt. Label durable-or-not; for
+  durable-carrying prompts that produced candidates, judge captured-or-missed
+  (does any candidate state the durable constraint?). Recall_A1 =
+  captured / durable-carrying. Report components (n short, n durable-carrying,
+  n captured, n missed-silent, n missed-while-emitting). Limitation disclosed:
+  per-prompt, not per-requirement — an upper bound on true recall.
+- **A2 (pastes):** each `_split_sentences` segment (the same segments
+  extraction consumed; limitation recorded — splitter artifacts affect both
+  sides equally). Recall_A2 = durable segments with ≥1 candidate /
+  durable segments. Precision per paste falls out of the same labels.
+- **Paste threshold (mechanical):** prompt ≥2000 chars OR ≥5 candidates.
+  Short = complement.
+- **Seeds:** extraction sampling `20260918` (unchanged); A1 sampling (iff
+  >150 zero-candidate prompts) `20260919`.
+
+### Pass 2 measurements (to follow)
 
 ---
 
