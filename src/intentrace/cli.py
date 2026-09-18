@@ -234,6 +234,38 @@ def _stale_lines(req_short: str, outcome: Stale, candidate: Requirement) -> list
     return lines
 
 
+def _record_ratification(
+    repo_root: Path,
+    req_id: str,
+    actor: str,
+    settle_id: str,
+    baseline: dict[str, str],
+) -> Decision | None:
+    """Append a ratify decision unless one landed while deciding.
+
+    Re-reads the log immediately before appending: a requirement that
+    became active after the view was built (a concurrent ratify or settle)
+    is rejected instead of recorded twice. Returns the appended decision,
+    or None if the requirement is already active.
+
+    This closes the minutes-scale window of a human answering a prompt,
+    not a microsecond-scale race: read-check-append is not atomic, and no
+    file lock is taken (the log must stay portable across platforms).
+    """
+    fresh = read_observations(repo_root)
+    if any(d.kind == "ratify" and d.req_id == req_id for d in fresh.decisions):
+        return None
+    decision = Decision.create(
+        kind="ratify",
+        req_id=req_id,
+        actor=actor,
+        settle_id=settle_id,
+        baseline_hashes=baseline,
+    )
+    append_decision(repo_root, decision)
+    return decision
+
+
 def cmd_ratify(args: argparse.Namespace) -> int:
     """Ratify one requirement: the deliberate act (I2), freshly baselined (I3)."""
     repo_root = _find_repo_root()
@@ -292,13 +324,10 @@ def cmd_ratify(args: argparse.Namespace) -> int:
         )
         return 1
 
-    decision = Decision.create(
-        kind="ratify",
-        req_id=candidate.req_id,
-        actor=actor,
-        baseline_hashes=outcome.baseline,
-    )
-    append_decision(repo_root, decision)
+    decision = _record_ratification(repo_root, candidate.req_id, actor, "", outcome.baseline)
+    if decision is None:
+        print(f"{req_short} is already active — not recorded twice")
+        return 0
     print(f"ratified {req_short}  baseline {len(outcome.baseline)} anchor(s)")
     return 0
 
@@ -371,16 +400,13 @@ def cmd_settle(args: argparse.Namespace) -> int:
             )
             skipped += 1
             continue
-        append_decision(
-            repo_root,
-            Decision.create(
-                kind="ratify",
-                req_id=sketch.req_id,
-                actor=actor,
-                settle_id=settle_id,
-                baseline_hashes=outcome.baseline,
-            ),
+        decision = _record_ratification(
+            repo_root, sketch.req_id, actor, settle_id, outcome.baseline
         )
+        if decision is None:
+            print(f"{req_short} became active while confirming — skipped.")
+            skipped += 1
+            continue
         print(f"ratified {req_short}")
         ratified += 1
 

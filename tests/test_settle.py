@@ -680,3 +680,74 @@ def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
         outputs.add(result.stdout.strip())
     assert len(outputs) == 1
     assert outputs.pop() == "['app.py::alpha', 'app.py::zeta']"
+
+
+# Slice 2 review follow-ups.
+
+
+def test_record_ratification_rejects_concurrent_ratify(tmp_path: Path) -> None:
+    """C1: a decision that landed after the view was built is not duplicated."""
+    import intentrace.cli as cli
+    from intentrace.log import append_decision
+    from intentrace.models import Decision
+    from intentrace.store import MemoryStore
+
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+
+    recorded = cli._record_ratification(repo, req_id, "tester", "", {"a": "b"})
+    assert recorded is not None
+    assert recorded.req_id == req_id
+    assert log_line_count(repo) == 2
+
+    # A second process recorded while this one was deciding: the re-read
+    # at record time must reject instead of appending a duplicate.
+    rival = Decision.create(kind="ratify", req_id="other", actor="rival")
+    append_decision(repo, rival)
+    before = log_line_count(repo)
+    assert cli._record_ratification(repo, "other", "tester", "", {}) is None
+    assert log_line_count(repo) == before
+    assert len(MemoryStore(repo).get_decisions("other")) == 1
+
+
+def test_settle_race_skips_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 end to end: a rival ratify during settle is skipped, not doubled."""
+    import argparse
+
+    import intentrace.cli as cli
+    from intentrace.models import Decision
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import SymbolTable
+
+    repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    real_scan = cli.build_symbol_table
+    real_append = cli.append_decision
+    calls: list[int] = []
+
+    def scanning(root: Path) -> SymbolTable:
+        # A concurrent process ratifies after this one displayed and
+        # confirmed, but before it records.
+        table = real_scan(root)
+        if calls:
+            real_append(
+                root,
+                Decision.create(kind="ratify", req_id=req_id, actor="rival", baseline_hashes={}),
+            )
+        calls.append(1)
+        return table
+
+    monkeypatch.setattr(cli, "build_symbol_table", scanning)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    monkeypatch.chdir(repo)
+
+    rc = cli.cmd_settle(argparse.Namespace(actor="tester"))
+    assert rc == 0
+    out, _ = capsys.readouterr()
+    assert "became active" in out
+    assert "0 ratified, 1 skipped" in out
+    store = MemoryStore(repo)
+    assert len(store.all_decisions) == 1
+    assert store.all_decisions[0].actor == "rival"
