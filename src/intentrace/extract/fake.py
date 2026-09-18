@@ -126,7 +126,10 @@ class FakeExtractor:
             symbols: Optional symbol table for anchor resolution.
                      When provided, unambiguous symbols mentioned in sentences
                      are resolved and anchors attached at extraction time.
-                     Ambiguous names are reported, not guessed (I4).
+                     Ambiguous names are reported, not guessed (I4). If any
+                     mentioned symbol is ambiguous, the requirement stays
+                     unanchored: a partially anchored requirement would
+                     present unsettled code targets as settled.
         """
         requirements: list[Requirement] = []
         ambiguous_symbols: dict[str, list[str]] = {}
@@ -150,7 +153,9 @@ class FakeExtractor:
                 stripped_end = stripped_start + len(sentence_text)
                 provenance = [Span(obs_id=obs.obs_id, start=stripped_start, end=stripped_end)]
 
-                # Resolve anchors from the symbol table
+                # Resolve anchors from the symbol table. All-or-nothing per
+                # sentence: any ambiguity drops every anchor for the
+                # requirement (see docstring).
                 anchors: list[AnchorRef] = []
                 if symbols:
                     anchors, ambiguous = _resolve_symbols(sentence_text, symbols)
@@ -158,6 +163,8 @@ class FakeExtractor:
                         if name not in ambiguous_symbols:
                             candidates = symbols.resolve_all(name)
                             ambiguous_symbols[name] = [c.symbol_path for c in candidates]
+                    if ambiguous:
+                        anchors = []
 
                 requirements.append(
                     Requirement.create(

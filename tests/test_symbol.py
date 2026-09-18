@@ -125,3 +125,46 @@ def test_unique_bare_name_resolves() -> None:
     assert len(result.requirements) == 1
     assert len(result.requirements[0].anchors) == 1
     assert result.requirements[0].anchors[0].symbol_path == "retry.py::attempt"
+
+
+def test_ambiguous_sentence_drops_all_anchors() -> None:
+    """One ambiguous symbol in a sentence leaves the requirement unanchored.
+
+    Even the definitively resolved symbols in that sentence are dropped:
+    a partially anchored requirement would present unsettled code targets
+    as settled.
+    """
+    source = b"def attempt():\n    pass\n"
+
+    tree_a = parse_source(source)
+    anchor_a = build_anchor("src/retry.py", tree_a, source, "attempt")
+
+    tree_b = parse_source(source)
+    anchor_b = build_anchor("lib/retry.py", tree_b, source, "attempt")
+
+    helper_source = b"def helper():\n    pass\n"
+    helper_tree = parse_source(helper_source)
+    helper_anchor = build_anchor("src/util.py", helper_tree, helper_source, "helper")
+    assert helper_anchor is not None
+
+    table = SymbolTable()
+    table.by_qualified[anchor_a.symbol_path] = anchor_a
+    table.by_qualified[anchor_b.symbol_path] = anchor_b
+    table.by_qualified[helper_anchor.symbol_path] = helper_anchor
+    table.by_bare["attempt"] = [anchor_a, anchor_b]
+    table.by_bare["helper"] = [helper_anchor]
+
+    obs = Observation.create(
+        session_id="s1",
+        turn_index=0,
+        kind="prompt",
+        text="The attempt function must retry and the helper function should always log.",
+    )
+
+    extractor = FakeExtractor()
+    result = extractor.extract([obs], symbols=table)
+
+    assert len(result.requirements) == 1
+    assert result.requirements[0].anchors == []
+    assert "attempt" in result.ambiguous_symbols
+    assert len(result.ambiguous_symbols["attempt"]) == 2
