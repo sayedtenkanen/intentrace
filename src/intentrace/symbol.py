@@ -7,8 +7,12 @@ returns all candidates; ambiguity is reported, not resolved by guessing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
+import tree_sitter
+
+from intentrace.anchor.python import build_anchor, parse_source
 from intentrace.models import AnchorRef
 
 
@@ -70,3 +74,59 @@ class SymbolTable:
     def resolve_all(self, name: str) -> list[AnchorRef]:
         """Return all candidates for a bare name (for ambiguity reporting)."""
         return self.by_bare.get(name, [])
+
+
+def build_symbol_table(repo_root: Path) -> SymbolTable:
+    """Scan all Python files and build a symbol table keyed by qualified path."""
+    table = SymbolTable()
+    for py_file in repo_root.rglob("*.py"):
+        if ".venv" in py_file.parts or "__pycache__" in py_file.parts:
+            continue
+        try:
+            source = py_file.read_bytes()
+        except OSError:
+            continue
+        tree = parse_source(source)
+        if not isinstance(tree, tree_sitter.Tree):
+            continue
+        repo_rel = str(py_file.relative_to(repo_root))
+        _collect_symbols(tree, repo_rel, source, table)
+    return table
+
+
+def _collect_symbols(
+    tree: tree_sitter.Tree,
+    file_path: str,
+    source: bytes,
+    table: SymbolTable,
+) -> None:
+    """Collect function and class symbols from a tree-sitter tree.
+
+    Recurses into nested classes and functions so that methods like
+    RetryPolicy.attempt are indexed.
+    """
+    _collect_symbols_from_node(tree.root_node, file_path, tree, source, table)
+
+
+def _collect_symbols_from_node(
+    node: tree_sitter.Node,
+    file_path: str,
+    tree: tree_sitter.Tree,
+    source: bytes,
+    table: SymbolTable,
+) -> None:
+    """Recursively collect symbols from a tree-sitter node."""
+    if node.type in ("function_definition", "class_definition"):
+        anchor = build_anchor(file_path, tree, source, node=node)
+        if anchor is not None:
+            table.by_qualified[anchor.symbol_path] = anchor
+            _index_bare_name(anchor, table)
+
+    for child in node.children:
+        _collect_symbols_from_node(child, file_path, tree, source, table)
+
+
+def _index_bare_name(anchor: AnchorRef, table: SymbolTable) -> None:
+    """Index an anchor by its bare symbol name (last component of symbol_path)."""
+    bare = anchor.symbol_path.rsplit("::", 1)[-1]
+    table.by_bare.setdefault(bare, []).append(anchor)

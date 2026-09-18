@@ -9,24 +9,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
 
+from intentrace.extract.port import ExtractionResult
 from intentrace.models import AnchorRef, Observation, Requirement, Span
 from intentrace.symbol import Ambiguous, Resolved, SymbolTable
 
 VERSION = "fake-v1"
-
-
-@dataclass
-class ExtractionResult:
-    """Result of requirement extraction.
-
-    Carries both the requirements and any ambiguous symbols encountered
-    during resolution, so that the CLI can report ambiguity to the human.
-    """
-
-    requirements: list[Requirement] = field(default_factory=list)
-    ambiguous_symbols: dict[str, list[str]] = field(default_factory=dict)
 
 
 # Normative markers (case-insensitive)
