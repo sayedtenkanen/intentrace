@@ -1,14 +1,13 @@
 # Corpus harvest — FakeExtractor against real transcripts
 
 **Status:** experiment, not a slice. Deliverable is evidence. No file under `src/`
-was modified; the extractor code is untouched. Pipeline: `tools/harvest.py`.
-This document contains aggregate statistics only — no prompt
-text, no transcript content. Labelling was done by the implementing agent, so all
-label-derived figures are **agent estimates, not ground truth**.
+was modified; the extractor code is untouched. Pipeline: `tools/harvest.py`
+(seed `20260918`). This document contains aggregate statistics only — no prompt
+text, no transcript content. Labelling was done by the implementing agent, so the
+precision figure is an **agent estimate, not ground truth**.
 
 Scope approvals: `pr-review-machine` sessions approved first; all turns within
-them approved second (those sessions also worked in other checkouts). Pass 2
-corpus (auto-harnessessing histories) approved third. Three scope
+them approved second (those sessions also worked in other checkouts). Two scope
 questions were asked and answered before any file content was read.
 
 ---
@@ -18,6 +17,10 @@ questions were asked and answered before any file content was read.
 ---
 
 ## Pass 2 — recall, and a second corpus
+
+Pass 2 corpus approved by a third scope question (auto-harnessessing
+histories), answered before any new file content was read. All label-derived
+pass-2 figures are agent estimates, not ground truth.
 
 ### Pass 2 corpus (file inventory only; no file opened yet)
 
