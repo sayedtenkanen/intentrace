@@ -231,6 +231,10 @@ def _stale_lines(req_short: str, outcome: Stale, candidate: Requirement) -> list
         lines.append(f"  {path}: proposed {old_hashes[path][:8]} → current {new_hashes[path][:8]}")
     for path in outcome.missing:
         lines.append(f"  {path}: no longer resolves")
+    for path in outcome.detached:
+        lines.append(f"  {path}: no longer attached by extractor")
+    for path in outcome.attached:
+        lines.append(f"  {path}: newly attached by extractor")
     return lines
 
 
@@ -305,10 +309,15 @@ def cmd_ratify(args: argparse.Namespace) -> int:
         print("not ratified")
         return 0
 
-    # Re-validate against current code before recording (I3): the baseline
-    # must describe code the human has just seen, not an earlier proposal.
+    # Re-validate against a fresh extraction before recording (I3): the
+    # baseline must describe code the human has just seen, not an earlier
+    # proposal. Re-extraction (not just a hash comparison) catches anchors
+    # the extractor would no longer attach, e.g. newly ambiguous names.
     fresh_symbols = build_symbol_table(repo_root)
-    outcome = check_fresh(candidate, fresh_symbols)
+    fresh_reqs = (
+        FakeExtractor().extract(view.store.all_observations, symbols=fresh_symbols).requirements
+    )
+    outcome = check_fresh(candidate, fresh_symbols, fresh_reqs)
     if isinstance(outcome, Stale):
         for line in _stale_lines(req_short, outcome, candidate):
             print(line)
@@ -384,7 +393,12 @@ def cmd_settle(args: argparse.Namespace) -> int:
             skipped += 1
             continue
         fresh_symbols = build_symbol_table(repo_root)
-        outcome = check_fresh(sketch, fresh_symbols)
+        fresh_reqs = (
+            FakeExtractor()
+            .extract(view.store.all_observations, symbols=fresh_symbols)
+            .requirements
+        )
+        outcome = check_fresh(sketch, fresh_symbols, fresh_reqs)
         if isinstance(outcome, Stale):
             for line in _stale_lines(req_short, outcome, sketch):
                 print(line)

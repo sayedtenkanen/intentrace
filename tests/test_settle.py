@@ -236,11 +236,74 @@ def test_freshness_refusal_represents_candidate(tmp_path: Path) -> None:
 
     (repo / "app.py").write_text(CODE_V2_DRIFT)
     symbols_v2 = build_symbol_table(repo)
+    fresh_reqs = FakeExtractor().extract(obs, symbols=symbols_v2).requirements
 
-    outcome = check_fresh(proposal, symbols_v2)
+    outcome = check_fresh(proposal, symbols_v2, fresh_reqs)
     assert isinstance(outcome, Stale)
     assert len(outcome.fresh_anchors) == 1
     assert outcome.fresh_anchors[0].node_hash != proposal.anchors[0].node_hash
+
+
+def test_check_fresh_detects_new_ambiguity(tmp_path: Path) -> None:
+    """C2: an anchor the extractor would now drop is stale, not baselineable."""
+    from intentrace.decisions import Stale, check_fresh
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import read_observations
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path)
+    symbols_v1 = build_symbol_table(repo)
+    obs = read_observations(repo).observations
+    proposal = FakeExtractor().extract(obs, symbols=symbols_v1).requirements[0]
+    assert len(proposal.anchors) == 1
+
+    # Same file untouched, but a second `total` elsewhere makes the bare
+    # name ambiguous: same path, same hash, no longer attached.
+    (repo / "other.py").write_text("def total(items):\n    return sum(items)\n")
+    symbols_v2 = build_symbol_table(repo)
+    fresh_reqs = FakeExtractor().extract(obs, symbols=symbols_v2).requirements
+    assert len(fresh_reqs) == 1
+    assert fresh_reqs[0].req_id == proposal.req_id
+    assert fresh_reqs[0].anchors == []
+
+    outcome = check_fresh(proposal, symbols_v2, fresh_reqs)
+    assert isinstance(outcome, Stale)
+    assert outcome.changed == []
+    assert outcome.missing == []
+    assert outcome.detached == ["app.py::total"]
+    assert outcome.fresh_anchors == []
+
+
+def test_ratify_cli_refuses_newly_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C2 end to end: ambiguity introduced before record refuses with re-presentation."""
+    import argparse
+
+    import intentrace.cli as cli
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import read_observations
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path)
+    table_v1 = build_symbol_table(repo)
+    (repo / "other.py").write_text("def total(items):\n    return sum(items)\n")
+    table_v2 = build_symbol_table(repo)
+
+    calls = iter([table_v1, table_v2])
+    monkeypatch.setattr(cli, "build_symbol_table", lambda _root: next(calls))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    monkeypatch.chdir(repo)
+
+    obs = read_observations(repo).observations
+    req_id = FakeExtractor().extract(obs, symbols=table_v1).requirements[0].req_id
+    rc = cli.cmd_ratify(argparse.Namespace(req_id=req_id, actor="tester"))
+    assert rc == 1
+    assert len(MemoryStore(repo).all_decisions) == 0
+    out, _ = capsys.readouterr()
+    assert "no longer attached" in out
+    assert "Re-derived candidate:" in out
 
 
 def test_ratify_cli_refuses_stale_proposal(

@@ -75,36 +75,66 @@ class Stale:
     fresh_anchors: list[AnchorRef]
     changed: list[str] = field(default_factory=list)  # paths with a new hash
     missing: list[str] = field(default_factory=list)  # paths that no longer resolve
+    detached: list[str] = field(default_factory=list)  # paths the extractor dropped
+    attached: list[str] = field(default_factory=list)  # paths the extractor added
 
 
-def check_fresh(candidate: Requirement, symbols: SymbolTable) -> Fresh | Stale:
-    """Re-validate a proposal against current code (I3).
+def check_fresh(
+    candidate: Requirement,
+    symbols: SymbolTable,
+    fresh_requirements: list[Requirement],
+) -> Fresh | Stale:
+    """Re-validate a proposal against a fresh extraction (I3).
 
-    Compares each proposed anchor against a freshly built symbol table.
-    A changed hash or a vanished symbol means the human has not seen this
-    code: refuse, and carry the re-derived anchors so the caller can
-    present the current candidate instead. Never fabricate a baseline for
-    code the human has not seen.
+    Compares the proposed anchor set against what the current extractor
+    attaches: a changed hash, a vanished symbol, a dropped attachment
+    (e.g. newly ambiguous), or a newly attached anchor all mean the human
+    has not seen this candidate. Refuse, and carry the re-derived anchors
+    so the caller can present the current candidate instead. Never
+    fabricate a baseline for code the human has not seen.
     """
+    fresh = next((r for r in fresh_requirements if r.req_id == candidate.req_id), None)
+    if fresh is None:
+        # The extractor no longer produces this requirement at all.
+        return Stale(
+            fresh_anchors=[],
+            detached=[a.symbol_path for a in candidate.anchors],
+        )
+
+    fresh_by_path = {a.symbol_path: a for a in fresh.anchors}
+    cand_by_path = {a.symbol_path: a for a in candidate.anchors}
     baseline: dict[str, str] = {}
-    fresh_anchors: list[AnchorRef] = []
     changed: list[str] = []
     missing: list[str] = []
+    detached: list[str] = []
+    attached: list[str] = []
 
-    for anchor in candidate.anchors:
-        current = symbols.by_qualified.get(anchor.symbol_path)
+    for path, anchor in cand_by_path.items():
+        current = fresh_by_path.get(path)
         if current is None:
-            missing.append(anchor.symbol_path)
+            if symbols.by_qualified.get(path) is None:
+                missing.append(path)
+            else:
+                detached.append(path)
         elif current.node_hash != anchor.node_hash:
-            changed.append(anchor.symbol_path)
-            baseline[anchor.symbol_path] = current.node_hash
-            fresh_anchors.append(current)
+            changed.append(path)
+            baseline[path] = current.node_hash
         else:
-            baseline[anchor.symbol_path] = current.node_hash
-            fresh_anchors.append(current)
+            baseline[path] = current.node_hash
 
-    if changed or missing:
-        return Stale(fresh_anchors=fresh_anchors, changed=changed, missing=missing)
+    for path in fresh_by_path:
+        if path not in cand_by_path:
+            attached.append(path)
+            baseline[path] = fresh_by_path[path].node_hash
+
+    if changed or missing or detached or attached:
+        return Stale(
+            fresh_anchors=list(fresh.anchors),
+            changed=changed,
+            missing=missing,
+            detached=detached,
+            attached=attached,
+        )
     return Fresh(baseline=baseline)
 
 
