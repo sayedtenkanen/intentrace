@@ -78,6 +78,8 @@ def _iter_lines(log_file: Path) -> list[str]:
 def read_observations(repo_root: Path) -> LogReadResult:
     """Read all observations and decisions from the log.
 
+    Named for its original Slice 1 role; it returns the full log envelope
+    (observations and decisions) and the name is kept stable for callers.
     Reads all lines and returns them as lists. A trailing unparseable
     line is detected as a torn line (recoverable). A mid-file unparseable
     line is corruption. Lines carrying dec_id are decisions; lines carrying

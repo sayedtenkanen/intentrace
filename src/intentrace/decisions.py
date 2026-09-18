@@ -113,7 +113,7 @@ class AnchorVerdict:
     """One anchor judged against the ratified baseline."""
 
     symbol_path: str
-    state: Literal["ok", "changed", "missing", "detached"]
+    state: Literal["changed", "missing", "detached"]
     baseline_hash: str | None = None
     current_hash: str | None = None
 

@@ -62,10 +62,10 @@ def _default_actor() -> str:
 
 
 def _ask(prompt: str) -> str | None:
-    """Prompt the human; None on EOF (treated as decline/quit, never yes)."""
+    """Prompt the human; None on EOF or interrupt (treated as decline/quit, never yes)."""
     try:
         return input(prompt)
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
         return None
 
 
@@ -78,7 +78,6 @@ class _View:
     requirements: list[Requirement]  # annotated with maturity/ratification
     orphaned: list[Decision]
     symbols: SymbolTable
-    ambiguous: dict[str, list[str]]
 
 
 def _load_view(repo_root: Path) -> _View | None:
@@ -109,7 +108,6 @@ def _load_view(repo_root: Path) -> _View | None:
         requirements=view.requirements,
         orphaned=view.orphaned,
         symbols=symbols,
-        ambiguous=extraction.ambiguous_symbols,
     )
 
 
@@ -217,7 +215,7 @@ def _format_orphaned_decision(decision: Decision) -> str:
     lines: list[str] = []
     lines.append(f"R-{decision.req_id[:8]}   orphaned decision ({decision.kind})")
     ts = decision.timestamp.strftime("%Y-%m-%d")
-    lines.append(f"  ratified   {ts}  {decision.actor}")
+    lines.append(f"  recorded   {ts}  {decision.actor}")
     concerned = ", ".join(sorted(decision.baseline_hashes)) or "—"
     lines.append(f"  concerned  {concerned}")
     lines.append("  note       no longer produced by extraction — see settle")

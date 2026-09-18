@@ -236,7 +236,7 @@ class Decision(BaseModel):
         Observation.create: the same logical decision reproduces the same id.
         """
         ts = timestamp or datetime.now(UTC)
-        baselines = baseline_hashes or {}
+        baselines = dict(baseline_hashes) if baseline_hashes else {}
         baseline_part = canonical_json(*[f"{k}={v}" for k, v in sorted(baselines.items())])
         raw = canonical_json(kind, req_id, actor, settle_id, rationale or "", baseline_part)
         dec_id = content_hash(raw)

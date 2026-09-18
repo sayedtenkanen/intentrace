@@ -46,10 +46,11 @@ file is the public record of what each slice actually delivered.
   normalization currently changes no outcome.
 - `build_symbol_table` moved from CLI to `symbol.py`; `ExtractionResult` moved to
   the port so the interface no longer lies about its return type.
-- 68 tests (13 new, including planted-drift-caught and refactor-no-false-drift,
+- 77 tests (22 new, including planted-drift-caught and refactor-no-false-drift,
   written before the code); ruff and `mypy --strict` clean.
 - Remediation: drift detail lines sorted (deterministic output), stale refusal
-  asserts presentation, `R-` input form tested, anchorless-active surfacing tested.
+  asserts presentation, `R-` input form tested, anchorless-active surfacing tested;
+  uncovered CLI branches covered, weak assertions strengthened, cleanup applied.
 
 **Still incomplete (by design)**
 

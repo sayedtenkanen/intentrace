@@ -117,17 +117,19 @@ def test_planted_drift_is_caught(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     req_id = extract_first_req_id(repo)
 
-    baseline_hash = build_anchor(
-        "app.py", parse_source(CODE_V1.encode()), CODE_V1.encode(), "total"
-    ).node_hash  # type: ignore[union-attr]
+    anchor_v1 = build_anchor("app.py", parse_source(CODE_V1.encode()), CODE_V1.encode(), "total")
+    assert anchor_v1 is not None
+    baseline_hash = anchor_v1.node_hash
 
     result = ratify_cli(repo, req_id)
     assert result.returncode == 0, result.stderr
 
     (repo / "app.py").write_text(CODE_V2_DRIFT)
-    current_hash = build_anchor(
+    anchor_v2 = build_anchor(
         "app.py", parse_source(CODE_V2_DRIFT.encode()), CODE_V2_DRIFT.encode(), "total"
-    ).node_hash  # type: ignore[union-attr]
+    )
+    assert anchor_v2 is not None
+    current_hash = anchor_v2.node_hash
     assert baseline_hash != current_hash
 
     out = why_cli(repo, "app.py:6")
