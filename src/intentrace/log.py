@@ -7,10 +7,10 @@ One complete JSON object per line, append-only, never rewritten.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from intentrace.models import Observation
+from intentrace.models import Decision, Observation
 
 
 class TornLineError(Exception):
@@ -33,9 +33,10 @@ class CorruptLineError(Exception):
 
 @dataclass(frozen=True)
 class LogReadResult:
-    """Result of reading the log: observations plus any line-level errors."""
+    """Result of reading the log: entries plus any line-level errors."""
 
     observations: list[Observation]
+    decisions: list[Decision] = field(default_factory=list)
     torn_line: TornLineError | None = None
     corrupt_line: CorruptLineError | None = None
 
@@ -50,6 +51,14 @@ def append_observation(repo_root: Path, obs: Observation) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(obs.model_dump_json() + "\n")
+
+
+def append_decision(repo_root: Path, decision: Decision) -> None:
+    """Append a single decision to the log (immutable; never rewritten)."""
+    log_file = _log_path(repo_root)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
 
 
 def _iter_lines(log_file: Path) -> list[str]:
@@ -67,11 +76,14 @@ def _iter_lines(log_file: Path) -> list[str]:
 
 
 def read_observations(repo_root: Path) -> LogReadResult:
-    """Read all observations from the log.
+    """Read all observations and decisions from the log.
 
-    Reads all lines and returns them as a list. A trailing unparseable
+    Named for its original Slice 1 role; it returns the full log envelope
+    (observations and decisions) and the name is kept stable for callers.
+    Reads all lines and returns them as lists. A trailing unparseable
     line is detected as a torn line (recoverable). A mid-file unparseable
-    line is corruption.
+    line is corruption. Lines carrying dec_id are decisions; lines carrying
+    obs_id are observations; anything else is corruption.
     """
     log_file = _log_path(repo_root)
     if not log_file.exists():
@@ -103,6 +115,7 @@ def read_observations(repo_root: Path) -> LogReadResult:
                 lines = lines[:-1]
 
     observations: list[Observation] = []
+    decisions: list[Decision] = []
 
     for i, line in enumerate(lines):
         try:
@@ -111,13 +124,20 @@ def read_observations(repo_root: Path) -> LogReadResult:
             corrupt_error = CorruptLineError(i + 1, line.rstrip("\n"))
             break
         try:
-            observations.append(Observation.model_validate(data))
+            if isinstance(data, dict) and "dec_id" in data:
+                decisions.append(Decision.model_validate(data))
+            elif isinstance(data, dict) and "obs_id" in data:
+                observations.append(Observation.model_validate(data))
+            else:
+                corrupt_error = CorruptLineError(i + 1, line.rstrip("\n"))
+                break
         except Exception:
             corrupt_error = CorruptLineError(i + 1, line.rstrip("\n"))
             break
 
     return LogReadResult(
         observations=observations,
+        decisions=decisions,
         torn_line=torn_error,
         corrupt_line=corrupt_error,
     )

@@ -1,6 +1,6 @@
 """Core data models for intentrace.
 
-A strict subset of docs/SPEC.md §6 for Slice 1.
+A strict subset of docs/SPEC.md §6 for slices 1 and 2.
 """
 
 from __future__ import annotations
@@ -131,17 +131,32 @@ class Observation(BaseModel):
         )
 
 
+class Ratification(BaseModel):
+    """The recorded consequence of a human taking responsibility.
+
+    Attached to a requirement at view-build time from the decision log;
+    never stored on the requirement itself. baseline_hashes maps each
+    ratified symbol_path to the node_hash as it was at ratification (I3).
+    """
+
+    actor: str
+    timestamp: datetime
+    settle_id: str = ""
+    baseline_hashes: dict[str, str] = {}
+
+
 class Requirement(BaseModel):
     """A statement of intended behaviour, with provenance and anchors."""
 
     req_id: str
     statement: str
     origin: Literal["declared"]
-    maturity: Literal["sketch"]
+    maturity: Literal["sketch", "active"]
     provenance: list[Span]
     derivation: Derivation
     anchors: list[AnchorRef]
     evidence: list[EvidenceRef] = []
+    ratification: Ratification | None = None
 
     @field_validator("provenance")
     @classmethod
@@ -183,4 +198,55 @@ class Requirement(BaseModel):
                 timestamp=datetime.now(UTC),
             ),
             anchors=anchors or [],
+        )
+
+
+class Decision(BaseModel):
+    """An immutable recorded human act, appended to the same JSONL log.
+
+    Only kind "ratify" is produced in slice 2; the kind union admits the
+    other SPEC §6.1 kinds without a schema change. baseline_hashes carries
+    the ratified baseline (symbol_path -> node_hash); it is empty for kinds
+    that have no baseline.
+    """
+
+    dec_id: str
+    kind: Literal["ratify", "waive", "demote", "archive", "migrate"]
+    req_id: str
+    actor: str
+    timestamp: datetime
+    settle_id: str = ""
+    rationale: str | None = None
+    baseline_hashes: dict[str, str] = {}
+
+    @classmethod
+    def create(
+        cls,
+        kind: Literal["ratify", "waive", "demote", "archive", "migrate"],
+        req_id: str,
+        actor: str,
+        settle_id: str = "",
+        rationale: str | None = None,
+        baseline_hashes: dict[str, str] | None = None,
+        timestamp: datetime | None = None,
+    ) -> Decision:
+        """Create a decision with a content-addressed id.
+
+        The timestamp is recorded but not hashed, mirroring
+        Observation.create: the same logical decision reproduces the same id.
+        """
+        ts = timestamp or datetime.now(UTC)
+        baselines = dict(baseline_hashes) if baseline_hashes else {}
+        baseline_part = canonical_json(*[f"{k}={v}" for k, v in sorted(baselines.items())])
+        raw = canonical_json(kind, req_id, actor, settle_id, rationale or "", baseline_part)
+        dec_id = content_hash(raw)
+        return cls(
+            dec_id=dec_id,
+            kind=kind,
+            req_id=req_id,
+            actor=actor,
+            timestamp=ts,
+            settle_id=settle_id,
+            rationale=rationale,
+            baseline_hashes=baselines,
         )
