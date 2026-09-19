@@ -151,6 +151,39 @@ paste wide.
 
 ---
 
+## Pass 3 — extraction recall: decompose, fix the splitter, re-measure
+
+### Part A — decomposing the deficit (no code changed)
+
+Every missed durable unit (30 A2 segments + 5 A1 prompts = 35) assigned one
+cause by reconstructing its true sentence and checking today's marker rule:
+
+- **marker-miss** (31): the true sentence lacks any normative marker. Includes
+  all 5 A1 prompts (4 verified single-segment; the fifth torn only at an
+  email address, markerless on reconstruction — counted marker-miss per the
+  both-rule) and 26 A2 segments (standing rules phrased as bare declarations:
+  determinism, no-I/O, stable ordering, no-rating-language, and the whole
+  test-code vocabulary of `assert`, which the rule never matches).
+- **segmentation-miss** (4, all in the mega-paste): true sentences that do
+  contain a marker, torn so neither half carries it — a `must` split from its
+  clause by a line break, a `do not` stranded in a truncated parenthetical,
+  and two `must`s separated from their constraints the same way.
+
+Per paste: mega 4/27, work-order 0/3, shorts 0/5. Pooled: 4/35 ≈ 0.11.
+
+- `recall_marker` (recall with perfect segmentation, today's rule):
+  (18 emitted-durable + 4 recovered) / 53 durable units ≈ **0.42**.
+- `recall_segmentation` (share of the deficit attributable to cutting):
+  4/35 ≈ **0.11**.
+
+Reading: cutting carries about a ninth of the deficit; the marker rule
+carries the rest. Slice 5 still moves — but a ninth is worth recovering
+without a model, which is Part B. Method note: each classification
+reconstructed the true sentence from neighboring segments; "both"
+(mis-cut and still markerless when fixed) counted as marker-miss.
+
+---
+
 ## 1. Method and corpus
 
 - **Projects:** 1 approved session directory (`pr-review-machine`).
