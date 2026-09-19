@@ -66,7 +66,88 @@ Units and pre-registered rules:
 - **Seeds:** extraction sampling `20260918` (unchanged); A1 sampling (iff
   >150 zero-candidate prompts) `20260919`.
 
-### Pass 2 measurements (to follow)
+### Pass 2 measurements
+
+Effective n is stated per number. Labelling by the agent; agent estimates.
+
+**Corpus table**
+
+| Sessions dir | Files | Sessions | Prompts | Range |
+|---|---|---|---|---|
+| auto-harnessessing | 5 | 5 | 41 | Jul 5–9 |
+| worktree great-vaughan | 1 | 1 | 1 | Jul 8 |
+| worktree loving-gould | 1 | 1 | 1 | Jul 8 |
+| pr-review-machine (pass 1) | 2 | 3 | 22 | Jul 9–Sep 12 |
+| **Total** | **9** | **10** | **65** | **Jul 5–Sep 12** |
+
+**A1 — recall on short prompts: 0/5.** 62 short prompts labelled in full (56
+zero-candidate, no sampling needed). 5 carry durable intent (3 agent-handoff
+capability wants, 1 workflow-separation rule, 1 commit-hygiene invariant);
+all 5 produced zero candidates, so captured = 0, missed-silent = 5,
+missed-while-emitting = 0. Recall 0.0 at n=5. Sensitivity: flipping every
+borderline call the skeptical way leaves 2 durable, still 0 captured — the
+zero survives its own borderlines. (6 short prompts with candidates were all
+non-durable; their 8 candidates are misses-by-construction for recall.)
+
+**A2 — recall inside pastes.**
+
+| Paste (session:turn) | Segments | Durable | Emitted | Recall | Precision |
+|---|---|---|---|---|---|
+| 95019ea3:0 (23KB spec) | 623 | 42 | 36 | 0.357 | 0.417 |
+| 9d14dd67:16 (work order) | 127 | 6 | 8 | 0.50 | 0.375 |
+| b6ac91f1:0 (tutorial doc) | 72 | 0 | 0 | n/a | n/a |
+| Pooled (n_pastes=3) | 822 | 48 | 44 | 0.375 | 0.409 |
+
+Miss mechanisms, counted on the mega-paste: ~two-thirds of missed durable
+segments lack any normative marker (standing rules phrased as bare
+declarations); the rest are splitter casualties — durable sentences torn
+across segments ("Nothing rates / compliance.", "Findings sorted stably /
+(class, then subject) so output diffs…") or list items with no verb, neither
+half stating a complete constraint.
+
+**B — variance, per document and per project.** Precision where defined:
+mega-paste 15/36, work-order paste 3/8, six short docs 1/8, tutorial doc
+undefined (0 emitted). Anchoring per project (current / historical tables):
+pr-review-machine 1/36 both; auto-harnessessing 0/13 current, 1/13
+historical; all others 0. Duplication: 1 within-session copy, 0 spanning
+sessions (n=52 candidates). No confidence interval is computed across
+sentences of one document; the pooled A2 recall above is flagged with its
+n_pastes=3 and covers documents, not a population.
+
+**C — anchoring with time-correct checkouts.** 20 distinct revs checked out
+as detached worktrees outside every repo, removed afterwards. Result: 2/52
+anchored historical vs 1/52 current-checkout — agreement within noise.
+Unmeasured, not low: 11 prompts (missing checkout), 5 prompts (checkout
+history starts after the prompt). The tutorial paste is a true negative
+(0 durable, 0 emitted). The hypothesis holds: spec prose states behaviour
+without naming functions, so the word-matches-symbol heuristic finds almost
+nothing in either table regime.
+
+**D — burst size (max candidates per single observation, per project).**
+pr-review-machine 36 [0,0,36]; auto-harnessessing 8 (34 zeros then
+1,1,1,1,1,8); great-vaughan 3 [3]; rest 0. Bursts are single-observation
+events: the ≤40 ceiling survives on current evidence with a margin one
+paste wide.
+
+**What the numbers decide.**
+
+- Pass-1 precision (0.42) survives as a band, not a point: 0.417, 0.375 on
+  pastes, 0.125 on shorts-with-candidates. It was a property of pasted
+  specs, which is where all of it still comes from.
+- Recall is unacceptable, on the grounds that matter: A1 0/5 (stark,
+  borderline-robust), A2 0.357–0.50 on pastes. The marker rule misses
+  bare-imperative intent entirely and a third to two-thirds of in-document
+  durable sentences. This is the stronger, better-evidenced case for moving
+  slice 5 earlier that pass 1 could not make.
+- The anchoring result is real (2/52 historical): most real requirements are
+  unanchorable by word-matching, so scope predicates and cross-cutting
+  support carry the design's weight and slice-2 drift covers a minority of
+  real intent. Reorder slice priorities on this basis, not on precision.
+- The ≤40 ceiling holds numerically (max 36) but a burst is one observation,
+  so design the queue around per-observation bursts rather than trusting 40.
+- `N` stays a guess: 2 tracked symbols (1 zero-width censored window, 1 no
+  usable history). To fix it, harvest sessions whose repos have covering
+  history; this corpus cannot.
 
 ---
 
