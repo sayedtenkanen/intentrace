@@ -305,6 +305,50 @@ before the gate accumulates unbounded stale inputs.
 
 ---
 
+## 7. Snapshots, suppression, and possible successors (slice 4 addendum)
+
+**Snapshot.** A ratification now carries a `RequirementSnapshot`: the statement,
+the provenance spans, and the extractor version that was ratified. This does
+not change `req_id` — identity is still statement + provenance + extractor
+version (§1–§3) — but it makes the ratification primary storage. The view is
+built from ratified snapshots plus re-derived sketches, so an extractor version
+bump can no longer hide what a human ratified. A decision written before
+snapshots existed has none and is reported orphaned with the reason; it is
+never silently promoted.
+
+**Suppression.** A sketch is not proposed when a ratified snapshot already
+covers it:
+
+- the sketch has the same provenance span in the same observation, or
+- its normalised statement equals a snapshot's normalised statement in any
+  observation.
+
+Suppression hides a proposal. It never merges `req_id`s, never rebinds a
+decision, and never drops the observation. The count and reasons are shown by
+`settle`, and the suppressed sketches can be listed. This is queue-level
+de-duplication (§0), not an identity change.
+
+The exception is "same words, different code": if the sketch proposes an anchor
+the snapshot's recorded set lacks, the two are not the same requirement just
+because the words match. The intended presentation is a separate item for a
+human decision. The current build attaches the anchor to the existing
+requirement as a late anchor instead; that divergence is recorded as open in
+`docs/DEVIATIONS.md`, not settled here.
+
+**Possible successor.** A sketch whose span partially overlaps a ratified
+snapshot's span, without either span being equal, is shown attached to the
+snapshot as a possible successor. It stays in the queue as its own sketch.
+Being displayed as a successor is not a migration: it does not transfer the
+ratification, does not change identity, and does not resolve the queue entry.
+
+**Baselines and append order.** Each ratification or attestation records
+`symbol_path → node_hash` baselines; the baseline's name-insensitive hash is a
+rename aid, not identity. Decisions are replayed in the order they were
+appended to `.intentrace/log.jsonl`. A timestamp is display data, so the order
+survives a clock that steps backwards.
+
+---
+
 ## Summary of decisions
 
 | Question | Decision | Key constraint satisfied |
