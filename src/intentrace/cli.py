@@ -36,6 +36,7 @@ from intentrace.decisions import (
 )
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import (
+    FoldError,
     append_decision,
     append_observation,
     log_lock,
@@ -118,7 +119,11 @@ def _report_scan_errors(symbols: SymbolTable) -> bool:
 
 def _load_view(repo_root: Path) -> _View | None:
     """Read the log, re-extract, replay decisions. None on corrupt log."""
-    log_result = read_observations(repo_root)
+    try:
+        log_result = read_observations(repo_root)
+    except FoldError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
     if log_result.torn_line:
         print(f"warning: {log_result.torn_line}", file=sys.stderr)
     if log_result.corrupt_line:
@@ -191,12 +196,22 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_requirement(req: Requirement, obs: Observation | None, verdict: ReqVerdict) -> str:
+def _format_requirement(
+    req: Requirement,
+    obs: Observation | None,
+    verdict: ReqVerdict,
+    history: bool = False,
+) -> str:
     """Format a requirement for display.
 
     Maturity is derived from the decision log; status from the drift
     verdict. satisfied and locked are never printed: evidence does not
     exist yet, so no requirement can have earned them (I5).
+
+    The attestation summary shows how many acts were appended since this
+    ratification, then the last one and the last accepted-drift rationale.
+    With history=True every earlier rationale is printed too, so nothing
+    recorded is reachable only by opening the log by hand.
     """
     lines: list[str] = []
     req_short = f"R-{req.req_id[:8]}"
@@ -219,12 +234,29 @@ def _format_requirement(req: Requirement, obs: Observation | None, verdict: ReqV
     if req.ratification is not None:
         rts = req.ratification.timestamp.strftime("%Y-%m-%d")
         lines.append(f"  ratified   {rts}  {req.ratification.actor}")
-        if req.ratification.attested_at is not None:
-            ats = req.ratification.attested_at.strftime("%Y-%m-%d")
+        attestations = req.ratification.attestations
+        if attestations:
+            last = attestations[-1]
+            ats = last.timestamp.strftime("%Y-%m-%d")
+            times = "time" if len(attestations) == 1 else "times"
             lines.append(
-                f"  attested   {ats}  {req.ratification.attest_actor} · "
-                f"{req.ratification.attest_reason}"
+                f"  attested   {len(attestations)} {times} · last {ats}  "
+                f"{last.actor} · {last.reason}"
             )
+            last_drift = next(
+                (a for a in reversed(attestations) if a.reason == "drift-accepted"),
+                None,
+            )
+            if last_drift is not None and last_drift.rationale:
+                lines.append(f"  rationale  {last_drift.rationale.strip()}")
+            if history:
+                for index, attestation in enumerate(attestations, 1):
+                    date = attestation.timestamp.strftime("%Y-%m-%d")
+                    lines.append(
+                        f"  history    {index}. {date}  {attestation.actor} · {attestation.reason}"
+                    )
+                    if attestation.rationale:
+                        lines.append(f'             "{attestation.rationale.strip()}"')
     else:
         lines.append("  ratified   —")
 
@@ -1041,7 +1073,7 @@ def cmd_why(args: argparse.Namespace) -> int:
         return 0
 
     for req, obs, verdict in found:
-        print(_format_requirement(req, obs, verdict))
+        print(_format_requirement(req, obs, verdict, history=args.history))
         print()
     for d in fallback_decisions:
         print(_format_orphaned_decision(d))
@@ -1062,6 +1094,11 @@ def main() -> int:
     # why
     why_parser = subparsers.add_parser("why", help="Show intent covering a code location")
     why_parser.add_argument("target", help="path:line to inspect")
+    why_parser.add_argument(
+        "--history",
+        action="store_true",
+        help="show every attestation, not only the latest summary",
+    )
 
     # ratify — one requirement, one deliberate act; never bulk (I2)
     ratify_parser = subparsers.add_parser("ratify", help="Ratify one requirement as an obligation")

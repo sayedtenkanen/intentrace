@@ -1,11 +1,13 @@
-"""Append-only JSONL log family with torn-line detection.
+"""Append-only JSONL log in one file, read in append order.
 
-Base path: .intentrace/log.jsonl at repo root. It carries observations and
-decision kinds an older build can parse.
-Versioned path: .intentrace/decisions-v2.jsonl. It carries decision kinds an
-older build cannot parse (currently `attest`), so a rollback still reads the
-base log normally.
-One complete JSON object per line, append-only, never rewritten.
+Path: .intentrace/log.jsonl at repo root. Observations and decisions of every
+kind share it. One complete JSON object per line, append-only, never rewritten.
+Position in this file is the only order; a timestamp is display data.
+
+A build before this one wrote decision kinds an older binary could not parse to
+a companion `.intentrace/decisions-v2.jsonl`. That file is folded into the base
+log once, under the lock, and kept beside it as
+`.intentrace/decisions-v2.folded.jsonl`.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import importlib
 import json
 import sys
 import threading
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -41,6 +44,20 @@ class CorruptLineError(Exception):
         super().__init__(f"corrupt line {line_number}: {raw!r}")
 
 
+class FoldError(Exception):
+    """The companion log cannot be folded without guessing.
+
+    The companion is only folded when the order of decisions for every
+    requirement it shares with the base log is known. Otherwise the caller
+    stops and names the requirement; position in the merged log is never
+    invented.
+    """
+
+    def __init__(self, message: str, req_id: str | None = None) -> None:
+        self.req_id = req_id
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class LogReadResult:
     """Result of reading the log: entries plus any line-level errors."""
@@ -55,21 +72,14 @@ def _log_path(repo_root: Path) -> Path:
     return repo_root / ".intentrace" / "log.jsonl"
 
 
-def _versioned_log_path(repo_root: Path) -> Path:
-    """Companion log for decision kinds an older build cannot parse."""
+def _companion_log_path(repo_root: Path) -> Path:
+    """The pre-remediation companion log, if a repository still has one."""
     return repo_root / ".intentrace" / "decisions-v2.jsonl"
 
 
-# The decision kinds a pre-slice-4 binary accepts (its `kind` is a Literal).
-# Records of these kinds stay in the base log so a rollback can still read
-# the repository. Anything else goes to the versioned companion log.
-LEGACY_DECISION_KINDS = frozenset({"ratify", "waive", "demote", "archive", "migrate"})
-
-
-def _decision_log_path(repo_root: Path, decision: Decision) -> Path:
-    if decision.kind in LEGACY_DECISION_KINDS:
-        return _log_path(repo_root)
-    return _versioned_log_path(repo_root)
+def _folded_log_path(repo_root: Path) -> Path:
+    """Where the folded companion is kept, unchanged."""
+    return repo_root / ".intentrace" / "decisions-v2.folded.jsonl"
 
 
 _lock_state = threading.local()
@@ -163,16 +173,12 @@ def append_observation(repo_root: Path, obs: Observation) -> None:
 
 
 def append_decision(repo_root: Path, decision: Decision) -> None:
-    """Append a single decision to the log (immutable; never rewritten).
+    """Append a single decision to the base log (immutable; never rewritten).
 
-    A kind an older binary cannot parse is written to the versioned
-    companion log, so the base log remains readable after a rollback.
+    Every decision kind shares the one log. Its position is the only record of
+    when it happened; the timestamp is display data.
     """
-    _append_line(
-        repo_root,
-        decision.model_dump_json() + "\n",
-        _decision_log_path(repo_root, decision),
-    )
+    _append_line(repo_root, decision.model_dump_json() + "\n", _log_path(repo_root))
 
 
 def _iter_lines(log_file: Path) -> list[str]:
@@ -243,36 +249,117 @@ def _parse_log_file(
     return entries, torn_error, corrupt_error
 
 
+def _check_fold_order(
+    base_entries: list[Observation | Decision],
+    companion_entries: list[Observation | Decision],
+) -> None:
+    """Refuse a fold whose per-requirement order would have to be guessed.
+
+    Within each file the append order is known. Across the two files the only
+    order this build can establish without reading timestamps is the one the
+    writing rules force: a requirement's ratify decisions were written to the
+    base log before its attestations were written to the companion, and no
+    other decision kind could be interleaved. Anything else stops the fold
+    and names the requirement.
+    """
+    base_by_req: dict[str, list[Decision]] = defaultdict(list)
+    companion_by_req: dict[str, list[Decision]] = defaultdict(list)
+    for entry in base_entries:
+        if isinstance(entry, Decision):
+            base_by_req[entry.req_id].append(entry)
+    for entry in companion_entries:
+        if isinstance(entry, Decision):
+            companion_by_req[entry.req_id].append(entry)
+
+    for req_id, companion_records in companion_by_req.items():
+        base_records = base_by_req.get(req_id)
+        if base_records is None:
+            # Nothing in the base log competes for this requirement's order.
+            continue
+        if any(record.kind != "attest" for record in companion_records):
+            raise FoldError(
+                f"cannot fold the companion log: decision order for requirement "
+                f"{req_id} cannot be established (the companion holds a "
+                f"non-attestation after a base-log decision)",
+                req_id=req_id,
+            )
+        if any(record.kind != "ratify" for record in base_records):
+            raise FoldError(
+                f"cannot fold the companion log: decision order for requirement "
+                f"{req_id} cannot be established (the base log holds a "
+                f"non-ratification after which an attestation was appended)",
+                req_id=req_id,
+            )
+
+
+def _fold_companion_log(repo_root: Path) -> None:
+    """Fold a pre-remediation companion log into the base log, once.
+
+    The companion's complete records are appended in their written order and
+    the original file is renamed, byte for byte, to a name that says it was
+    folded. A partial trailing record is left in the folded file, not silently
+    discarded, and reported. If order cannot be established the fold stops
+    before modifying either file.
+    """
+    companion = _companion_log_path(repo_root)
+    if not companion.exists():
+        return
+
+    with log_lock(repo_root):
+        if not companion.exists():
+            return
+        folded = _folded_log_path(repo_root)
+        if folded.exists():
+            raise FoldError(
+                f"cannot fold {companion.name}: {folded.name} already exists; "
+                "refusing to overwrite a previous fold"
+            )
+
+        companion_entries, torn_error, corrupt_error = _parse_log_file(companion)
+        if corrupt_error is not None:
+            raise FoldError(f"cannot fold {companion.name}: {corrupt_error}")
+        base_entries, _, base_corrupt = _parse_log_file(_log_path(repo_root))
+        if base_corrupt is not None:
+            # The read will report the base log's corruption. Leave the
+            # companion untouched so the fold can be retried after repair.
+            return
+
+        _check_fold_order(base_entries, companion_entries)
+        if companion_entries:
+            payload = "".join(entry.model_dump_json() + "\n" for entry in companion_entries)
+            _append_line(repo_root, payload, _log_path(repo_root))
+
+        if torn_error is not None:
+            print(
+                f"warning: {torn_error}; the partial record is kept in {folded.name}",
+                file=sys.stderr,
+            )
+        companion.rename(folded)
+        print(
+            f"folded {companion.name} into {_log_path(repo_root).name}; "
+            f"original kept as {folded.name}",
+            file=sys.stderr,
+        )
+
+
 def read_observations(repo_root: Path) -> LogReadResult:
-    """Read all observations and decisions from the log family.
+    """Read observations and decisions from the log, in append order.
 
     Named for its original Slice 1 role; it returns the full log envelope
     (observations and decisions) and the name is kept stable for callers.
-    The base log carries observations and decision kinds a pre-slice-4
-    binary can parse. The versioned companion log carries newer decision
-    kinds. Entries from both are merged by timestamp, so an attestation
-    still follows the ratification it amends.
+    Entries are returned in the order they were appended. Timestamps are
+    display data: no read path sorts or compares them. A timestamp with no
+    timezone is returned exactly as it was stored.
 
-    A trailing unparseable line is detected as a torn line (recoverable).
-    A mid-file unparseable line is corruption. Lines carrying dec_id are
-    decisions; lines carrying obs_id are observations; anything else is
-    corruption.
+    A pre-remediation companion log is folded first, once. A trailing
+    unparseable line is detected as a torn line (recoverable). A mid-file
+    unparseable line is corruption. Lines carrying dec_id are decisions;
+    lines carrying obs_id are observations; anything else is corruption.
     """
-    base_entries, torn_error, corrupt_error = _parse_log_file(_log_path(repo_root))
-    extra_entries, extra_torn, extra_corrupt = _parse_log_file(_versioned_log_path(repo_root))
-    torn_error = torn_error or extra_torn
-    corrupt_error = corrupt_error or extra_corrupt
-
-    # Base first on a timestamp tie: an attestation cannot precede the
-    # ratification it amends, and the base holds the ratification.
-    ranked = [
-        *((entry.timestamp, 0, index, entry) for index, entry in enumerate(base_entries)),
-        *((entry.timestamp, 1, index, entry) for index, entry in enumerate(extra_entries)),
-    ]
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-
-    observations = [entry for _, _, _, entry in ranked if isinstance(entry, Observation)]
-    decisions = [entry for _, _, _, entry in ranked if isinstance(entry, Decision)]
+    _fold_companion_log(repo_root)
+    entries, torn_error, corrupt_error = _parse_log_file(_log_path(repo_root))
+    observations = [entry for entry in entries if isinstance(entry, Observation)]
+    decisions = [entry for entry in entries if isinstance(entry, Decision)]
 
     return LogReadResult(
         observations=observations,

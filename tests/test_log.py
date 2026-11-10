@@ -8,8 +8,11 @@ import pytest
 
 from intentrace.log import (
     CorruptLineError,
+    FoldError,
     TornLineError,
-    _versioned_log_path,
+    _companion_log_path,
+    _folded_log_path,
+    _log_path,
     append_decision,
     append_observation,
     log_lock,
@@ -164,107 +167,144 @@ def test_empty_log(repo_root: Path) -> None:
     assert result.torn_line is None
 
 
-# Rollback compatibility: records an older binary cannot parse are kept out
-# of the base log.
+# One log: every decision kind shares the base file, in append order.
 
 
-def _ratify(actor: str = "tester"):
-    return Decision.create(kind="ratify", req_id="a" * 64, actor=actor)
+def _ratify(actor: str = "tester", req_id: str = "a" * 64):
+    return Decision.create(kind="ratify", req_id=req_id, actor=actor)
 
 
-def _attest(reason: str = "late-anchor", req_id: str = "a" * 64):
+def _attest(
+    reason: str = "late-anchor",
+    req_id: str = "a" * 64,
+    rationale: str | None = None,
+):
     return Decision.create(
         kind="attest",
         req_id=req_id,
         actor="tester",
         reason=reason,
+        rationale=rationale,
         baseline_hashes={},
     )
 
 
-def test_attestation_goes_to_the_versioned_log(repo_root: Path) -> None:
-    """The base log keeps only kinds a pre-slice-4 reader can parse."""
+def _write_companion(repo_root: Path, decisions: list[Decision]) -> None:
+    _companion_log_path(repo_root).write_text(
+        "".join(decision.model_dump_json() + "\n" for decision in decisions)
+    )
+
+
+def test_every_decision_kind_goes_to_the_base_log(repo_root: Path) -> None:
+    """Attest is not routed anywhere else; one log carries every kind."""
     append_decision(repo_root, _ratify())
     append_decision(repo_root, _attest())
 
-    base = (repo_root / ".intentrace" / "log.jsonl").read_text()
-    versioned = _versioned_log_path(repo_root).read_text()
+    base = _log_path(repo_root).read_text()
     assert '"kind":"ratify"' in base
-    assert '"kind":"attest"' not in base
-    assert '"kind":"attest"' in versioned
+    assert '"kind":"attest"' in base
+    assert not _companion_log_path(repo_root).exists()
 
     result = read_observations(repo_root)
     assert [d.kind for d in result.decisions] == ["ratify", "attest"]
 
 
-def test_base_log_stays_parseable_by_a_pre_slice4_reader(repo_root: Path) -> None:
-    """Every base-log line validates against the old closed kind set."""
-    from datetime import datetime
-    from typing import Literal
-
-    from pydantic import BaseModel
-
-    class LegacyDecision(BaseModel):
-        dec_id: str
-        kind: Literal["ratify", "waive", "demote", "archive", "migrate"]
-        req_id: str
-        actor: str
-        timestamp: datetime
-        settle_id: str = ""
-        rationale: str | None = None
-        baseline_hashes: dict[str, str] = {}
-
+def test_unknown_kind_is_read_from_the_single_log(repo_root: Path) -> None:
+    """A kind this build does not know is newer, and the rest still loads."""
     append_decision(repo_root, _ratify())
     append_decision(
         repo_root,
-        Decision.create(
-            kind="attest",
-            req_id="b" * 64,
-            actor="tester",
-            reason="drift-accepted",
-            rationale="accepting drift",
-            baseline_hashes={},
-        ),
+        Decision.create(kind="waive-v2", req_id="b" * 64, actor="future"),
     )
-
-    lines = (repo_root / ".intentrace" / "log.jsonl").read_text().splitlines()
-    assert len(lines) == 1
-    for line in lines:
-        LegacyDecision.model_validate_json(line)
-
-
-def test_versioned_decisions_merge_in_time_order(repo_root: Path) -> None:
-    """A rollback ratify appended to the base log keeps its place in time."""
-    from datetime import UTC, datetime
-
-    first = _ratify("first")
-    first = first.model_copy(update={"timestamp": datetime(2026, 1, 1, tzinfo=UTC)})
-    attest = _attest().model_copy(update={"timestamp": datetime(2026, 1, 2, tzinfo=UTC)})
-    second = _ratify("second").model_copy(update={"timestamp": datetime(2026, 1, 3, tzinfo=UTC)})
-
-    append_decision(repo_root, first)
-    append_decision(repo_root, attest)
-    append_decision(repo_root, second)
-
-    base = (repo_root / ".intentrace" / "log.jsonl").read_text()
-    assert base.count('"kind":"ratify"') == 2
-    assert '"kind":"attest"' not in base
-
-    result = read_observations(repo_root)
-    assert [d.kind for d in result.decisions] == ["ratify", "attest", "ratify"]
-    assert [d.actor for d in result.decisions] == ["first", "tester", "second"]
-
-
-def test_versioned_log_repairs_its_own_torn_tail(repo_root: Path) -> None:
-    """A partial write in the companion log is repaired before its next append."""
-    append_decision(repo_root, _attest(req_id="a" * 64))
-    versioned = _versioned_log_path(repo_root)
-    with open(versioned, "a") as f:
-        f.write('{"dec_id":"partial"')  # interrupted, no newline
-
     append_decision(repo_root, _attest(req_id="b" * 64))
 
     result = read_observations(repo_root)
-    assert result.torn_line is None
     assert result.corrupt_line is None
-    assert [d.req_id for d in result.decisions] == ["a" * 64, "b" * 64]
+    assert result.torn_line is None
+    assert [d.kind for d in result.decisions] == ["ratify", "waive-v2", "attest"]
+    assert result.decisions[2].req_id == "b" * 64
+
+
+def test_read_returns_entries_in_append_order_not_timestamp_order(repo_root: Path) -> None:
+    """A backwards clock changes display data, never read order."""
+    from datetime import UTC, datetime
+
+    first = _ratify("first").model_copy(update={"timestamp": datetime(2026, 1, 2, tzinfo=UTC)})
+    second = _ratify("second").model_copy(update={"timestamp": datetime(2026, 1, 1, tzinfo=UTC)})
+    append_decision(repo_root, first)
+    append_decision(repo_root, second)
+
+    result = read_observations(repo_root)
+    assert [d.actor for d in result.decisions] == ["first", "second"]
+    assert result.decisions[0].timestamp > result.decisions[1].timestamp
+
+
+def test_companion_log_is_folded_once_and_kept(
+    repo_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The companion is appended once, renamed unchanged, and never folded twice."""
+    append_decision(repo_root, _ratify("base"))
+    _write_companion(
+        repo_root,
+        [
+            _attest("late-anchor"),
+            _attest("drift-accepted", rationale="accepting the new retry count"),
+        ],
+    )
+    original = _companion_log_path(repo_root).read_bytes()
+
+    result = read_observations(repo_root)
+    assert [d.kind for d in result.decisions] == ["ratify", "attest", "attest"]
+    assert [d.reason for d in result.decisions] == [None, "late-anchor", "drift-accepted"]
+
+    folded = _folded_log_path(repo_root)
+    assert folded.read_bytes() == original
+    assert not _companion_log_path(repo_root).exists()
+    assert "folded" in capsys.readouterr().err
+
+    again = read_observations(repo_root)
+    assert [d.dec_id for d in again.decisions] == [d.dec_id for d in result.decisions]
+    assert capsys.readouterr().err == ""
+    assert folded.read_bytes() == original
+
+
+def test_fold_keeps_each_requirements_order(repo_root: Path) -> None:
+    """Appending the companion at the end keeps every requirement's own order."""
+    a = "a" * 64
+    b = "b" * 64
+    append_decision(repo_root, _ratify(req_id=a))
+    append_decision(repo_root, _ratify(req_id=b))
+    _write_companion(
+        repo_root,
+        [
+            _attest(req_id=a),
+            _attest(req_id=b),
+            _attest(reason="rename", req_id=a),
+        ],
+    )
+
+    result = read_observations(repo_root)
+    a_decisions = [d for d in result.decisions if d.req_id == a]
+    b_decisions = [d for d in result.decisions if d.req_id == b]
+    assert [d.kind for d in a_decisions] == ["ratify", "attest", "attest"]
+    assert [d.reason for d in a_decisions] == [None, "late-anchor", "rename"]
+    assert [d.kind for d in b_decisions] == ["ratify", "attest"]
+
+
+def test_fold_stops_when_order_cannot_be_established(repo_root: Path) -> None:
+    """An interleaving this build cannot know is refused, naming the requirement."""
+    req_id = "c" * 64
+    append_decision(repo_root, _ratify(req_id=req_id))
+    append_decision(
+        repo_root,
+        Decision.create(kind="waive", req_id=req_id, actor="tester"),
+    )
+    _write_companion(repo_root, [_attest(req_id=req_id)])
+    base_before = _log_path(repo_root).read_bytes()
+    companion_before = _companion_log_path(repo_root).read_bytes()
+
+    with pytest.raises(FoldError, match=req_id):
+        read_observations(repo_root)
+
+    assert _log_path(repo_root).read_bytes() == base_before
+    assert _companion_log_path(repo_root).read_bytes() == companion_before
