@@ -23,11 +23,17 @@ CODE_FROB = '"""Service."""\n\n\ndef frobnicate():\n    return 1\n'
 
 CODE_FROB_CHANGED = '"""Service."""\n\n\ndef frobnicate():\n    return 2\n'
 
+CODE_FROB_DELETED = '"""Service."""\n'
+
 CODE_RECURSIVE = '"""Countdown."""\n\n\ndef countdown(n):\n    if n:\n        countdown(n - 1)\n'
 
 CODE_RENAMED = '"""Countdown."""\n\n\ndef count_up(n):\n    if n:\n        count_up(n - 1)\n'
 
 OBS_RECURSIVE = "The countdown function must stop at zero."
+
+CODE_TWO = '"""Two."""\n\n\ndef alpha():\n    return 1\n\n\ndef beta():\n    return 2\n'
+
+CODE_TWO_RENAMED = '"""Two."""\n\n\ndef gamma():\n    return 1\n\n\ndef delta():\n    return 2\n'
 
 
 def make_repo(tmp_path: Path, code: str, text: str) -> Path:
@@ -201,6 +207,8 @@ def test_recursive_rename_is_proposed_and_attested(tmp_path: Path) -> None:
     assert settled.returncode == 0, settled.stderr
     assert "count_up" in settled.stdout
     assert "rename" in settled.stdout
+    # The same requirement must not also be reported as unimplemented.
+    assert "unimplemented" not in settled.stdout
 
     final = decisions(repo)[-1]
     assert final.kind == "attest"
@@ -233,6 +241,44 @@ def test_legacy_ratification_without_snapshot_is_orphaned_with_reason(tmp_path: 
     loaded = view(repo)
     assert [d.req_id for d in loaded.orphaned] == [req_id]
     assert loaded.requirements[0].maturity == "sketch"
+
+    # The report says why, so the reader does not look for a version bump.
+    settled = run_cli(repo, "settle", input_text="")
+    assert settled.returncode == 0
+    assert "snapshot" in settled.stdout.lower()
+
+
+def test_legacy_ratification_can_be_superseded_by_ratifying_again(tmp_path: Path) -> None:
+    """A decision with no snapshot must not block re-ratifying its sketch.
+
+    Otherwise the requirement is reported orphaned while ratify answers
+    "already active" and no recorded act can ever make it active.
+    """
+    from intentrace.log import append_decision
+    from intentrace.models import Decision
+
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    req_id = derive(repo)[0].req_id
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={"app.py::frobnicate": "0" * 64},
+        ),
+    )
+
+    ratified = run_cli(repo, "ratify", req_id, "--actor", "tester")
+    assert ratified.returncode == 0, ratified.stderr
+    assert "already active" not in ratified.stdout.lower()
+    assert "ratified" in ratified.stdout
+
+    loaded = view(repo)
+    active = [r for r in loaded.requirements if r.maturity == "active"]
+    assert [r.req_id for r in active] == [req_id]
+    assert loaded.orphaned == []
+    assert len(decisions(repo)) == 2
 
 
 def test_unknown_decision_kind_is_not_corruption(tmp_path: Path) -> None:
@@ -281,6 +327,157 @@ def test_same_statement_in_second_observation_is_not_ratified_twice(tmp_path: Pa
     # The original utterance's sketch and the duplicate are both covered.
     assert len(loaded.suppressed) == 2
     assert {s.reason for s in loaded.suppressed} == {"same span", "same statement"}
+
+
+def test_one_attest_cannot_drop_another_missing_anchor(tmp_path: Path) -> None:
+    """Two orphaned anchors need two replacements, one per --anchor.
+
+    Attesting a single rename must not quietly remove the other missing
+    anchor from the baseline: that would accept a disappearance no human
+    recorded.
+    """
+    from intentrace.log import append_decision
+    from intentrace.models import Decision, Observation, RequirementSnapshot, Span
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path, CODE_TWO, FROB)
+    symbols = build_symbol_table(repo)
+    alpha = symbols.by_qualified["app.py::alpha"]
+    beta = symbols.by_qualified["app.py::beta"]
+    obs_id = Observation.create(session_id="s1", turn_index=0, kind="prompt", text=FROB).obs_id
+    req_id = "c" * 64
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={
+                alpha.symbol_path: alpha.node_hash,
+                beta.symbol_path: beta.node_hash,
+            },
+            baseline_name_hashes={
+                alpha.symbol_path: alpha.name_hash,
+                beta.symbol_path: beta.name_hash,
+            },
+            snapshot=RequirementSnapshot(
+                statement=FROB,
+                provenance=[Span(obs_id=obs_id, start=0, end=len(FROB))],
+                extractor_version="fake-v2",
+            ),
+        ),
+    )
+    (repo / "app.py").write_text(CODE_TWO_RENAMED)
+
+    partial = run_cli(repo, "attest", req_id, "--anchor", "app.py::gamma")
+    assert partial.returncode != 0
+    assert "one --anchor per missing anchor" in (partial.stdout + partial.stderr).lower()
+    assert len(decisions(repo)) == 1
+
+    both = run_cli(
+        repo,
+        "attest",
+        req_id,
+        "--anchor",
+        "app.py::gamma",
+        "--anchor",
+        "app.py::delta",
+    )
+    assert both.returncode == 0, both.stderr
+    final = decisions(repo)[-1]
+    assert final.kind == "attest"
+    assert final.reason == "rename"
+    assert set(final.baseline_hashes) == {"app.py::gamma", "app.py::delta"}
+
+
+def test_deleted_anchor_needs_a_rationale_and_becomes_unimplemented(
+    tmp_path: Path,
+) -> None:
+    """A vanished anchor with no replacement has an exit, not a dead end.
+
+    Accepting the disappearance is drift-accepted and needs a rationale.
+    Afterwards the obligation is unimplemented, not orphaned forever.
+    """
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    req_id = derive(repo)[0].req_id
+    assert run_cli(repo, "ratify", req_id).returncode == 0
+    (repo / "app.py").write_text(CODE_FROB_DELETED)
+
+    refused = run_cli(repo, "attest", req_id)
+    assert refused.returncode != 0
+    assert "rationale" in (refused.stdout + refused.stderr).lower()
+    assert len(decisions(repo)) == 1
+
+    accepted = run_cli(repo, "attest", req_id, "--rationale", "frobnicate was removed")
+    assert accepted.returncode == 0, accepted.stderr
+    final = decisions(repo)[-1]
+    assert final.reason == "drift-accepted"
+    assert final.baseline_hashes == {}
+
+    settled = run_cli(repo, "settle", input_text="")
+    assert "orphaned" not in settled.stdout
+    assert "unimplemented" in settled.stdout
+
+    # The obligation can be re-attached when the code comes back, by a
+    # recorded act rather than by a silent extractor match.
+    (repo / "app.py").write_text(CODE_FROB)
+    reattached = run_cli(repo, "attest", req_id, "--anchor", "app.py::frobnicate")
+    assert reattached.returncode == 0, reattached.stderr
+    assert decisions(repo)[-1].reason == "late-anchor"
+    assert "app.py::frobnicate" in decisions(repo)[-1].baseline_hashes
+
+
+def test_drift_outranks_a_simultaneous_rename(tmp_path: Path) -> None:
+    """A changed body is drift-accepted even when another anchor was renamed.
+
+    The tool assigns the reason, so a rename elsewhere cannot make the
+    acknowledgement cheaper than the drift it also accepts.
+    """
+    from intentrace.log import append_decision
+    from intentrace.models import Decision, Observation, RequirementSnapshot, Span
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path, CODE_TWO, FROB)
+    symbols = build_symbol_table(repo)
+    alpha = symbols.by_qualified["app.py::alpha"]
+    beta = symbols.by_qualified["app.py::beta"]
+    obs_id = Observation.create(session_id="s1", turn_index=0, kind="prompt", text=FROB).obs_id
+    req_id = "d" * 64
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={
+                alpha.symbol_path: alpha.node_hash,
+                beta.symbol_path: beta.node_hash,
+            },
+            baseline_name_hashes={
+                alpha.symbol_path: alpha.name_hash,
+                beta.symbol_path: beta.name_hash,
+            },
+            snapshot=RequirementSnapshot(
+                statement=FROB,
+                provenance=[Span(obs_id=obs_id, start=0, end=len(FROB))],
+                extractor_version="fake-v2",
+            ),
+        ),
+    )
+    (repo / "app.py").write_text(
+        '"""Two."""\n\n\ndef gamma():\n    return 1\n\n\ndef beta():\n    return 3\n'
+    )
+
+    refused = run_cli(repo, "attest", req_id)
+    assert refused.returncode != 0
+    assert "rationale" in (refused.stdout + refused.stderr).lower()
+    assert len(decisions(repo)) == 1
+
+    accepted = run_cli(repo, "attest", req_id, "--rationale", "beta now returns 3")
+    assert accepted.returncode == 0, accepted.stderr
+    final = decisions(repo)[-1]
+    assert final.reason == "drift-accepted"
+    assert set(final.baseline_hashes) == {"app.py::gamma", "app.py::beta"}
 
 
 def test_open_drift_verdict_is_offered_as_attest_item(tmp_path: Path) -> None:

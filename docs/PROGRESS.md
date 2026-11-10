@@ -8,7 +8,7 @@ file is the public record of what each slice actually delivered.
 
 ## Slice 4 — durable ratification, and an exit for every open verdict
 
-**Status:** complete; review pending.
+**Status:** complete; review remediated.
 
 **Delivered**
 
@@ -23,8 +23,10 @@ file is the public record of what each slice actually delivered.
   late anchor; a partial span overlap is shown as a possible successor and stays in the
   queue.
 - **Attest.** `intentrace attest <req_id>` records one act that sets the full baseline.
-  The tool assigns the reason: `drift-accepted` (rationale required), `rename` or `move`
-  when a missing anchor is replaced, otherwise `late-anchor`. `why` shows the attestation
+  The tool assigns the reason: `drift-accepted` (a rationale is required; also when a
+  vanished anchor has no replacement and is dropped), `rename` or `move` when a missing
+  anchor is replaced, otherwise `late-anchor`. `--anchor` repeats once per missing anchor,
+  so one attestation cannot silently drop another anchor. `why` shows the attestation
   date, actor and reason.
 - **Rename proposals.** Anchors record a name-insensitive hash; `settle` proposes the
   renamed symbol when exactly one same-file symbol matches. The hash erases the definition
@@ -32,8 +34,15 @@ file is the public record of what each slice actually delivered.
 - **Every open verdict has an exit.** `settle` presents `unconfirmed` and `orphaned`
   requirements as attest items, one at a time, before sketches. No batch attest.
 - **Unknown decision kinds** are read as written by a newer version, not corruption.
-- 95 tests (9 new in `tests/test_slice4.py`, including the three exit tests); ruff, ruff
-  format and `mypy --strict` clean.
+- **Review remediation.** A legacy ratify with no snapshot no longer blocks re-ratifying
+  its sketch; `--anchor` covers every missing anchor; `settle` no longer lists an
+  orphaned requirement as also unimplemented; an attestation with an empty baseline is
+  replayed instead of ignored; a deleted anchor with no replacement is an acknowledged
+  `drift-accepted` drop rather than a dead end, and can be re-attached later as a late
+  anchor. `RequirementSnapshot` enforces the provenance invariant so a malformed record
+  cannot crash the view.
+- 99 tests (13 in `tests/test_slice4.py`, including the three exit tests and the review
+  findings); ruff, ruff format and `mypy --strict` clean.
 
 **Intentional behaviour changes**
 
@@ -52,6 +61,12 @@ file is the public record of what each slice actually delivered.
   emitted; v0.1 keeps the ratified identity and suppresses the re-derived sketch.
 - Ratified requirements are still local (`.intentrace/log.jsonl`), not a tracked ledger.
 - No evidence links, so `satisfied` and `locked` remain unprintable.
+- A pre-slice-4 ratification under a different extractor version cannot be promoted: no
+  statement was stored, so there is nothing to make primary. It is reported with the
+  reason.
+- An acknowledged deletion shows in `settle` as an unimplemented obligation, not in
+  `why`: no code location remains to ask about. Re-attaching code with `attest --anchor`
+  makes it visible again.
 
 ---
 

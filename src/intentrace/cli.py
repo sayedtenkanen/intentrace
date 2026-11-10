@@ -231,15 +231,25 @@ def _format_requirement(req: Requirement, obs: Observation | None, verdict: ReqV
     return "\n".join(lines)
 
 
+def _orphan_reason(decision: Decision) -> str:
+    """Why this decision has no active requirement to attach to."""
+    if decision.kind == "ratify" and decision.snapshot is None:
+        return (
+            "ratified before snapshots were stored — the statement was not "
+            "recorded; re-ratify the sketch if it is still proposed"
+        )
+    return "no active ratification has this id"
+
+
 def _format_orphaned_decision(decision: Decision) -> str:
-    """Format a decision whose req_id the extractor no longer produces."""
+    """Format a decision whose req_id has no active requirement."""
     lines: list[str] = []
     lines.append(f"R-{decision.req_id[:8]}   orphaned decision ({decision.kind})")
     ts = decision.timestamp.strftime("%Y-%m-%d")
     lines.append(f"  recorded   {ts}  {decision.actor}")
     concerned = ", ".join(sorted(decision.baseline_hashes)) or "—"
     lines.append(f"  concerned  {concerned}")
-    lines.append("  note       no longer produced by extraction — see settle")
+    lines.append(f"  reason     {_orphan_reason(decision)}")
     return "\n".join(lines)
 
 
@@ -280,7 +290,13 @@ def _record_ratification(
     file lock is taken (the log must stay portable across platforms).
     """
     fresh = read_observations(repo_root)
-    if any(d.kind == "ratify" and d.req_id == req_id for d in fresh.decisions):
+    # Only a snapshot-bearing ratify makes a requirement active. A decision
+    # written before snapshots existed must not block re-ratifying the same
+    # sketch: that would leave an orphaned requirement with no exit.
+    if any(
+        d.kind == "ratify" and d.req_id == req_id and d.snapshot is not None
+        for d in fresh.decisions
+    ):
         return None
     decision = Decision.create(
         kind="ratify",
@@ -387,17 +403,26 @@ class _AttestPlan:
     name_baseline: dict[str, str]
     reason: str
     renamed: dict[str, str] = field(default_factory=dict)
+    dropped: list[str] = field(default_factory=list)
 
 
 def _plan_attest(
-    req: Requirement, symbols: SymbolTable, extra_path: str | None = None
+    req: Requirement, symbols: SymbolTable, extra_paths: list[str] | None = None
 ) -> tuple[_AttestPlan | None, str]:
     """Plan one attestation, or say why it cannot be planned.
 
-    The tool assigns the reason from what it observes: a changed body is
-    drift-accepted, a missing anchor replaced by a same-file match is a
-    rename (different file: move), and an anchor with no baseline is a late
-    anchor. The human cannot pick a cheaper reason.
+    The tool assigns the reason from what it observes: a changed body, or a
+    vanished anchor with no replacement, is drift-accepted (a rationale is
+    required); a missing anchor replaced by a same-file match is a rename
+    (different file: move); and an anchor with no baseline is a late anchor.
+    The human cannot pick a cheaper reason.
+
+    Every missing anchor must be covered by the plan. A manual --anchor
+    list must have one entry per missing anchor, so attesting one rename
+    cannot silently drop another anchor from the baseline. With no --anchor,
+    a missing anchor that has exactly one same-file match is proposed as a
+    rename; one with no match is shown as dropped and needs the drift
+    rationale; more than one match needs a manual --anchor.
     """
     if req.ratification is None:
         return None, "not a ratified requirement"
@@ -411,28 +436,45 @@ def _plan_attest(
     ]
     missing = sorted(path for path in baseline if path not in symbols.by_qualified)
 
-    extra = None
-    if extra_path is not None:
-        extra = symbols.by_qualified.get(extra_path)
+    extras: list[AnchorRef] = []
+    for path in extra_paths or []:
+        extra = symbols.by_qualified.get(path)
         if extra is None:
-            return None, f"no symbol at {extra_path}"
+            return None, f"no symbol at {path}"
+        if extra.symbol_path in baseline:
+            return None, f"{path} is already anchored"
+        if any(a.symbol_path == path for a in extras):
+            return None, f"duplicate --anchor {path}"
+        extras.append(extra)
 
     anchors = {a.symbol_path: a for a in req.anchors}
     renamed: dict[str, str] = {}
+    dropped: list[str] = []
 
     if missing:
-        if extra is not None:
-            if len(missing) > 1:
-                matches = [p for p in missing if names.get(p) == extra.name_hash]
-                if len(matches) != 1:
+        if extras:
+            if len(extras) != len(missing):
+                return None, (
+                    f"{len(missing)} anchor(s) are missing; pass one --anchor per missing anchor"
+                )
+            remaining = list(missing)
+            assigned: dict[str, AnchorRef] = {}
+            for extra in extras:
+                matches = [old for old in remaining if names.get(old) == extra.name_hash]
+                if len(matches) == 1:
+                    old = matches[0]
+                elif len(missing) == 1 and len(extras) == 1:
+                    old = missing[0]
+                else:
                     return None, (
-                        "cannot tell which missing anchor this replaces; pass --anchor per anchor"
+                        f"cannot tell which missing anchor --anchor {extra.symbol_path} "
+                        "replaces; pass one --anchor per missing anchor"
                     )
-                old = matches[0]
-            else:
-                old = missing[0]
-            renamed[old] = extra.symbol_path
-            anchors[extra.symbol_path] = extra
+                assigned[old] = extra
+                remaining.remove(old)
+            for old, anchor in assigned.items():
+                renamed[old] = anchor.symbol_path
+                anchors[anchor.symbol_path] = anchor
         else:
             proposals: dict[str, AnchorRef] = {}
             for old in missing:
@@ -445,8 +487,11 @@ def _plan_attest(
                     for a in symbols.by_qualified.values()
                     if a.file == file and a.name_hash == name_hash and a.symbol_path != old
                 ]
-                if len(candidates) != 1:
-                    return None, (f"{len(candidates)} rename candidates for {old}; pass --anchor")
+                if len(candidates) == 0:
+                    dropped.append(old)
+                    continue
+                if len(candidates) > 1:
+                    return None, f"{len(candidates)} rename candidates for {old}; pass --anchor"
                 proposals[old] = candidates[0]
             resolved = {a.symbol_path for a in proposals.values()}
             if len(resolved) != len(proposals):
@@ -454,11 +499,14 @@ def _plan_attest(
             for old, anchor in proposals.items():
                 renamed[old] = anchor.symbol_path
                 anchors[anchor.symbol_path] = anchor
-    elif extra is not None:
-        anchors[extra.symbol_path] = extra
+    elif extras:
+        for extra in extras:
+            anchors[extra.symbol_path] = extra
 
     pending = sorted(path for path in anchors if path not in baseline)
-    if changed:
+    # A vanished anchor with no replacement is accepted drift: the human
+    # acknowledges that the implementation is gone, and must give a reason.
+    if changed or dropped:
         reason = "drift-accepted"
     elif renamed:
         same_file = all(
@@ -476,6 +524,7 @@ def _plan_attest(
             name_baseline={path: anchor.name_hash for path, anchor in anchors.items()},
             reason=reason,
             renamed=renamed,
+            dropped=dropped,
         ),
         "",
     )
@@ -525,6 +574,8 @@ def cmd_attest(args: argparse.Namespace) -> int:
     print()
     for old, new in sorted(plan.renamed.items()):
         print(f"  propose    {old} → {new}")
+    for old in sorted(plan.dropped):
+        print(f"  drop       {old} — no replacement found")
     print(f"  attest     {plan.reason}: {', '.join(sorted(plan.baseline)) or '—'}")
     print()
     answer = _ask(f"Attest {req_short}? [y/N] ")
@@ -561,7 +612,7 @@ def cmd_settle(args: argparse.Namespace) -> int:
             ts = d.timestamp.strftime("%Y-%m-%d")
             print(
                 f"  R-{d.req_id[:8]} {d.kind} by {d.actor} on {ts} — "
-                f"no longer produced by extraction; concerned {concerned}"
+                f"{_orphan_reason(d)}; concerned {concerned}"
             )
         print()
 
@@ -602,6 +653,8 @@ def cmd_settle(args: argparse.Namespace) -> int:
                 continue
             for old, new in sorted(plan.renamed.items()):
                 print(f"  propose    {old} → {new}")
+            for old in sorted(plan.dropped):
+                print(f"  drop       {old} — no replacement found")
             print(f"  proposed   {plan.reason}: {', '.join(sorted(plan.baseline)) or '—'}")
             answer = _ask(f"Attest {req_short}? [y(es)/N(o)/q(uit)] ")
             if answer is None or answer.strip().lower() in ("q", "quit"):
@@ -649,7 +702,14 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print()
 
     sketches = [r for r in view.requirements if r.maturity == "sketch"]
-    unimplemented = [r for r in view.requirements if r.maturity == "active" and not r.anchors]
+    # Only a requirement that never had an anchor is unimplemented. An
+    # orphaned requirement has an empty anchor set too, and listing it here
+    # would contradict its own verdict.
+    unimplemented = [
+        r
+        for r in view.requirements
+        if r.maturity == "active" and judge_requirement(r, view.symbols).status == "unimplemented"
+    ]
     if unimplemented:
         # Informational only: these are obligations with no code location,
         # so `why` cannot attach them anywhere and they are never queue items.
@@ -855,8 +915,12 @@ def main() -> int:
     attest_parser.add_argument("req_id", help="req_id or unique prefix of an active requirement")
     attest_parser.add_argument(
         "--anchor",
+        action="append",
         default=None,
-        help="qualified symbol path to attest onto (defaults to a unique rename candidate)",
+        help=(
+            "qualified symbol path to attest onto; repeat once per missing anchor "
+            "(defaults to a unique rename candidate)"
+        ),
     )
     attest_parser.add_argument(
         "--rationale",

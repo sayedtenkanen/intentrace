@@ -144,6 +144,14 @@ class RequirementSnapshot(BaseModel):
     provenance: list[Span]
     extractor_version: str
 
+    @field_validator("provenance")
+    @classmethod
+    def provenance_non_empty(cls, v: list[Span]) -> list[Span]:
+        """I9 holds for the snapshot too: a ratification always cites a span."""
+        if not v:
+            raise ValueError("provenance must be non-empty (I9)")
+        return v
+
 
 class Ratification(BaseModel):
     """The recorded consequence of a human taking responsibility.

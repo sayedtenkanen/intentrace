@@ -120,10 +120,10 @@ def apply_decisions(
         name_baseline = dict(snapshot_decision.baseline_name_hashes)
         last_attest: Decision | None = None
         for attest in attests.get(req_id, []):
-            if attest.baseline_hashes:
-                baseline = dict(attest.baseline_hashes)
-            if attest.baseline_name_hashes:
-                name_baseline = dict(attest.baseline_name_hashes)
+            # An attestation always replaces the baseline, including with an
+            # empty one: that is how a deleted anchor is acknowledged.
+            baseline = dict(attest.baseline_hashes)
+            name_baseline = dict(attest.baseline_name_hashes)
             last_attest = attest
 
         active.append(

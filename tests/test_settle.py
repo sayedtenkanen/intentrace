@@ -845,7 +845,7 @@ def test_settle_race_skips_without_duplicate(
     import argparse
 
     import intentrace.cli as cli
-    from intentrace.models import Decision
+    from intentrace.models import Decision, RequirementSnapshot, Span
     from intentrace.store import MemoryStore
     from intentrace.symbol import SymbolTable
 
@@ -862,7 +862,17 @@ def test_settle_race_skips_without_duplicate(
         if calls:
             real_append(
                 root,
-                Decision.create(kind="ratify", req_id=req_id, actor="rival", baseline_hashes={}),
+                Decision.create(
+                    kind="ratify",
+                    req_id=req_id,
+                    actor="rival",
+                    baseline_hashes={},
+                    snapshot=RequirementSnapshot(
+                        statement="s",
+                        provenance=[Span(obs_id="o", start=0, end=1)],
+                        extractor_version="v",
+                    ),
+                ),
             )
         calls.append(1)
         return table
