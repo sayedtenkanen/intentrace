@@ -6,6 +6,25 @@ file is the public record of what each slice actually delivered.
 
 ---
 
+## FakeExtractor fake-v2 — splitter rework (migration event)
+
+**Status:** complete.
+
+**Delivered**
+
+- `_split_sentences` v2: decimals/versions and abbreviations never split;
+  `Class.method` references survive intact (resolving D4's unreachable branch
+  as a consequence); wrapped lines join; list/table/heading items stay units;
+  lone markers never end a segment. Offsets exact; provenance tests unweakened.
+- **`VERSION` bumped `fake-v1` → `fake-v2`.** Segmentation changes spans, spans
+  are in `req_id`, so every id changes — exactly the migration event design
+  note §3 describes. Pre-bump ratifications become orphaned decisions;
+  exercised end to end (`test_version_bump_orphans_old_ratifications`).
+- **Migration itself remains unimplemented.** Orphaned decisions are reported
+  (settle, why-fallback), never silently dropped or rebound.
+
+---
+
 ## Slice 2 — the settle loop: ratification, and the first real drift
 
 **Status:** complete.

@@ -497,6 +497,55 @@ def test_no_bulk_ratify_flag() -> None:
         assert "--all" not in result.stdout
 
 
+def _raise_eof(_prompt: str) -> str:
+    raise EOFError
+
+
+def test_version_bump_orphans_old_ratifications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Part B: a pre-bump ratification is reported orphaned, not dropped."""
+    import argparse
+
+    import intentrace.cli as cli
+    import intentrace.extract.fake as fake_mod
+    from intentrace.decisions import apply_decisions
+    from intentrace.extract.fake import FakeExtractor
+    from intentrace.store import MemoryStore
+    from intentrace.symbol import build_symbol_table
+
+    real_version = fake_mod.VERSION
+    assert real_version != "fake-v0"
+    repo = make_repo(tmp_path)
+
+    # Phase 1: ratify under the old extractor version.
+    monkeypatch.setattr(fake_mod, "VERSION", "fake-v0")
+    old_id = extract_first_req_id(repo)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    monkeypatch.chdir(repo)
+    assert cli.cmd_ratify(argparse.Namespace(req_id=old_id, actor="tester")) == 0
+
+    # Phase 2: the bumped extractor no longer produces that id.
+    monkeypatch.setattr(fake_mod, "VERSION", real_version)
+    monkeypatch.setattr("builtins.input", _raise_eof)
+    rc = cli.cmd_settle(argparse.Namespace(actor="tester"))
+    out, _ = capsys.readouterr()
+    assert rc == 0
+    assert "orphaned" in out.lower()
+    assert old_id[:8] in out
+
+    store = MemoryStore(repo)
+    assert len(store.all_decisions) == 1
+    view = apply_decisions(
+        FakeExtractor()
+        .extract(store.all_observations, symbols=build_symbol_table(repo))
+        .requirements,
+        store.all_decisions,
+    )
+    assert [d.req_id for d in view.orphaned] == [old_id]
+    assert all(r.maturity == "sketch" for r in view.requirements)
+
+
 # Slice 2 remediation — follow-up tests (commits 1 and 2).
 
 
