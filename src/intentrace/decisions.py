@@ -19,6 +19,7 @@ from typing import Literal
 from intentrace.models import (
     ATTEST_REASONS,
     AnchorRef,
+    Attestation,
     Decision,
     Derivation,
     Ratification,
@@ -109,6 +110,10 @@ def apply_decisions(
     snapshot already covers the same span or the same normalised statement.
     A sketch proposing an anchor the snapshot lacks is attached as a late
     anchor; a partial span overlap is attached as a possible successor.
+
+    Decisions are replayed in the order they were appended. A timestamp is
+    display data and never decides which act came first; this holds even when
+    the clock stepped backwards between two appends.
     """
     ratifies: dict[str, list[Decision]] = {}
     unknown: list[Decision] = []
@@ -134,11 +139,13 @@ def apply_decisions(
 
         baseline = dict(snapshot_decision.baseline_hashes)
         name_baseline = dict(snapshot_decision.baseline_name_hashes)
-        last_attest: Decision | None = None
-        # Only attestations recorded after this ratification may replace its
-        # baseline. An older attestation belongs to a superseded ratification.
-        start = decisions.index(snapshot_decision) + 1
-        for attest in decisions[start:]:
+        attestations: list[Attestation] = []
+        # Only attestations appended after this ratification may replace its
+        # baseline. An earlier attestation belongs to a superseded ratification.
+        snapshot_index = next(
+            index for index, decision in enumerate(decisions) if decision is snapshot_decision
+        )
+        for attest in decisions[snapshot_index + 1 :]:
             if attest.kind != "attest" or attest.req_id != req_id:
                 continue
             # An attestation always replaces the baseline, including with an
@@ -148,7 +155,15 @@ def apply_decisions(
                 continue
             baseline = dict(attest.baseline_hashes)
             name_baseline = dict(attest.baseline_name_hashes)
-            last_attest = attest
+            attestations.append(
+                Attestation(
+                    timestamp=attest.timestamp,
+                    actor=attest.actor,
+                    reason=attest.reason or "",
+                    rationale=attest.rationale,
+                )
+            )
+        last_attest = attestations[-1] if attestations else None
 
         active.append(
             Requirement(
@@ -171,6 +186,7 @@ def apply_decisions(
                     attested_at=last_attest.timestamp if last_attest else None,
                     attest_actor=last_attest.actor if last_attest else None,
                     attest_reason=last_attest.reason if last_attest else None,
+                    attestations=attestations,
                 ),
             )
         )

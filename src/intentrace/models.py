@@ -155,6 +155,20 @@ class RequirementSnapshot(BaseModel):
         return v
 
 
+class Attestation(BaseModel):
+    """One recorded attestation, in the order it was appended.
+
+    Kept as history rather than collapsed to the last line: `why` shows the
+    count and the last act by default, and every earlier rationale remains
+    reachable from the command line.
+    """
+
+    timestamp: datetime
+    actor: str
+    reason: str
+    rationale: str | None = None
+
+
 class Ratification(BaseModel):
     """The recorded consequence of a human taking responsibility.
 
@@ -164,6 +178,10 @@ class Ratification(BaseModel):
     baseline_name_hashes carries the rename-insensitive hash for the same
     paths, so a later rename can be proposed without re-deriving the old
     body.
+
+    attestations holds every valid attestation appended after this
+    ratification, in append order. The attested_at/attest_actor/
+    attest_reason fields repeat the last one for existing callers.
     """
 
     actor: str
@@ -174,6 +192,7 @@ class Ratification(BaseModel):
     attested_at: datetime | None = None
     attest_actor: str | None = None
     attest_reason: str | None = None
+    attestations: list[Attestation] = []
 
 
 class Requirement(BaseModel):

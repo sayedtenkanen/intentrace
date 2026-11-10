@@ -6,6 +6,72 @@ file is the public record of what each slice actually delivered.
 
 ---
 
+## Slice 4 remediation — one log, no clock, and the finished definition of done
+
+**Status:** complete; reviewed fixes applied.
+
+**Delivered**
+
+- **Append order is the only order.** `read_observations` returns entries in the
+  order they were appended. No read path sorts or compares timestamps, so a
+  timezone-less timestamp and a clock that steps backwards are both harmless.
+  Timestamps are stored and displayed as given; nothing is coerced to UTC.
+  Reproduced before the fix: a timezone-less observation crashed every later
+  read with `TypeError: can't compare offset-naive and offset-aware datetimes`;
+  a backwards-stamped second attestation was replayed before the first and
+  turned an accepted drift back into `unconfirmed`.
+- **One log file.** Every decision kind, including `attest`, appends to
+  `.intentrace/log.jsonl`. The tolerant reader still accepts unknown kinds as
+  written by a newer version. An existing `.intentrace/decisions-v2.jsonl` is
+  folded once under the lock: its complete records are appended in their written
+  order, the original is kept unchanged as
+  `.intentrace/decisions-v2.folded.jsonl`, and stderr says so naming both files.
+  The fold stops and names the requirement when per-requirement order cannot be
+  established from the two files; it never guesses and never rewrites the base
+  log. A second read does not fold again.
+- **`why` shows attestation history.** The default summary gives the count since
+  ratification, the last date, actor and reason, and the last accepted-drift
+  rationale. `why --history` prints every attestation and every rationale in
+  append order. This is the chosen mechanism for reaching earlier rationales.
+- **Named fitness-function tests.**
+  `test_ff_no_baselineless_anchor`, `test_ff_open_verdicts_have_an_exit`, and
+  `test_ff_attest_is_not_laundering` each build one repository holding sketch,
+  clean active, late anchor, unattested late anchor, drift, orphan, and
+  requirements attested for `late-anchor`, `rename`, `move` and
+  `drift-accepted` at the same time.
+- **Clock and timestamp guards.** A clock-backwards test asserts append order
+  and a body change afterwards; a lexical guard over `log.py` and
+  `decisions.py` catches a timestamp-keyed sort or comparison and states that
+  it is a guard, not a proof.
+- 128 tests (21 in `tests/test_slice4.py` unchanged); ruff, ruff format and
+  `mypy --strict` clean.
+
+**Intentional behaviour changes**
+
+- The companion-log tests were replaced deliberately:
+  `test_attestation_goes_to_the_versioned_log`,
+  `test_base_log_stays_parseable_by_a_pre_slice4_reader`,
+  `test_versioned_decisions_merge_in_time_order` and
+  `test_versioned_log_repairs_its_own_torn_tail` described the old two-file
+  layout. In their place: every kind in one base log, unknown-kind tolerance,
+  append-order reading, a one-time fold that keeps the original, per-requirement
+  fold order, and a named refusal when that order cannot be established.
+- Pre-slice-4 rollback compatibility is gone. No build has been released, so
+  there is no older reader to protect: a log written from slice 4 onward
+  (including `attest`) is not readable by a pre-slice-4 build. This supersedes
+  the slice 4 entry's claim that rollback is supported by a companion file.
+
+**Still incomplete (by design)**
+
+- The "same words, different code" case is attached as a late anchor rather
+  than shown as a separate decision item; it is recorded as open in
+  `docs/DEVIATIONS.md` for the owner to decide before slice 5. This pass did
+  not change it.
+- Migration proposals, evidence, `satisfied`/`locked`, and the CI gate remain
+  out of scope.
+
+---
+
 ## Slice 4 — durable ratification, and an exit for every open verdict
 
 **Status:** complete; review remediated.
@@ -80,12 +146,10 @@ file is the public record of what each slice actually delivered.
 - An acknowledged deletion shows in `settle` as an unimplemented obligation, not in
   `why`: no code location remains to ask about. Re-attaching code with `attest --anchor`
   makes it visible again.
-- Rollback is supported by a versioned companion log: `.intentrace/log.jsonl` keeps
-  observations and decision kinds a pre-slice-4 build can parse, while `attest` and any
-  future unknown kind go to `.intentrace/decisions-v2.jsonl`. Readers merge both by
-  timestamp. An older build ignores the companion file, so it never marks the log
-  corrupt; the residual limitation is that it cannot see acknowledged attestations and
-  may report that drift as `unconfirmed`.
+- The companion-log claim made when this slice merged was withdrawn by the slice 4
+  remediation. There is one log, position is the only order, and a log that contains
+  `attest` is not readable by a pre-slice-4 build. No build was released, so no rollback
+  guarantee was owed. See the remediation entry above.
 
 ---
 

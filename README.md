@@ -134,19 +134,22 @@ its date, actor and reason. What is still missing: no evidence and therefore no
 `satisfied` or `locked` states, no CI gate, no cross-cutting requirements (scope
 predicates), Python only, and migration is specified but not executed.
 
-**Upgrade and downgrade.** Records are written where the reader that
-introduced them can find them. The base `.intentrace/log.jsonl` carries
-observations and decision kinds a pre-slice-4 build accepts; decision kinds it
-cannot parse, including `attest`, go to the versioned companion
-`.intentrace/decisions-v2.jsonl`. Every reader merges both by timestamp, so an
-attestation still follows the ratification it amends.
+**One log, read in append order.** `.intentrace/log.jsonl` carries observations
+and decisions of every kind, including `attest`. Position in that one
+append-only file is the only order; a timestamp is display data and never
+decides which act came first. A repository written by an earlier slice 4 build
+may still have `.intentrace/decisions-v2.jsonl`: the first read folds it into
+the base log under the lock, keeps the original unchanged as
+`.intentrace/decisions-v2.folded.jsonl`, and says so on stderr. The fold appends
+and never rewrites; if the per-requirement order cannot be established from the
+two files, it stops and names the requirement instead of guessing. A second
+read does not fold again.
 
-Rollback is therefore supported: an older build reads the base log normally and
-simply ignores the companion file. The safe degradation is that it does not see
-acknowledged attestations, so a drift a human accepted can be reported as
-`unconfirmed` again — never as corruption. Forward compatibility is unchanged:
-new builds read old logs, and unknown decision kinds are read as written by a
-newer version rather than as corruption.
+New builds read logs written by older ones, and an unknown decision kind is
+read as written by a newer version rather than as corruption. No build has been
+released, so there is no rollback guarantee: a log that contains `attest` is
+not readable by a pre-slice-4 build. `why --history` prints every attestation
+for a requirement, so earlier rationales stay reachable from the command line.
 
 Divergences from the slice brief are recorded in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md),
 and per-slice status in [`docs/PROGRESS.md`](docs/PROGRESS.md).
