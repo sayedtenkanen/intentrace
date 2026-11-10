@@ -52,8 +52,9 @@ file is the public record of what each slice actually delivered.
   file fails closed instead of treating anchors as deleted. `apply_decisions` requires
   the symbol table and uses the most recent ratification. Same-statement sketches are
   ratified once per settle run. `why` shows a legacy orphan alongside its sketch, and
-  the README documents `attest`, the settle flow, and the downgrade limit.
-- 115 tests (21 in `tests/test_slice4.py`, including the three exit tests and both review
+  the README documents `attest`, the settle flow, and the versioned log that
+  makes rollback readable.
+- 119 tests (21 in `tests/test_slice4.py`, including the three exit tests and both review
   passes); ruff, ruff format and `mypy --strict` clean.
 
 **Intentional behaviour changes**
@@ -79,10 +80,12 @@ file is the public record of what each slice actually delivered.
 - An acknowledged deletion shows in `settle` as an unimplemented obligation, not in
   `why`: no code location remains to ask about. Re-attaching code with `attest --anchor`
   makes it visible again.
-- Downgrading after `attest` has been used is unsupported: builds before slice 4 treat an
-  `attest` record as corruption. Forward compatibility (new builds reading old logs) is
-  implemented; rollback compatibility cannot be added to already-released binaries, so
-  the limit is documented in the README.
+- Rollback is supported by a versioned companion log: `.intentrace/log.jsonl` keeps
+  observations and decision kinds a pre-slice-4 build can parse, while `attest` and any
+  future unknown kind go to `.intentrace/decisions-v2.jsonl`. Readers merge both by
+  timestamp. An older build ignores the companion file, so it never marks the log
+  corrupt; the residual limitation is that it cannot see acknowledged attestations and
+  may report that drift as `unconfirmed`.
 
 ---
 

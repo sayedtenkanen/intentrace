@@ -134,13 +134,19 @@ its date, actor and reason. What is still missing: no evidence and therefore no
 `satisfied` or `locked` states, no CI gate, no cross-cutting requirements (scope
 predicates), Python only, and migration is specified but not executed.
 
-**Upgrade and downgrade.** Decisions written by this version are forward-compatible:
-an older log without snapshots is read and its ratifications are reported as orphaned
-with the reason, and unknown decision kinds (including `attest`) are read as written by
-a newer version rather than as corruption. The reverse is not supported: an older build
-predating slice 4 validates decision kinds against a closed set and will treat an
-`attest` record as corrupt. Downgrading after `attest` has been used therefore requires
-removing those records from the log by hand.
+**Upgrade and downgrade.** Records are written where the reader that
+introduced them can find them. The base `.intentrace/log.jsonl` carries
+observations and decision kinds a pre-slice-4 build accepts; decision kinds it
+cannot parse, including `attest`, go to the versioned companion
+`.intentrace/decisions-v2.jsonl`. Every reader merges both by timestamp, so an
+attestation still follows the ratification it amends.
+
+Rollback is therefore supported: an older build reads the base log normally and
+simply ignores the companion file. The safe degradation is that it does not see
+acknowledged attestations, so a drift a human accepted can be reported as
+`unconfirmed` again — never as corruption. Forward compatibility is unchanged:
+new builds read old logs, and unknown decision kinds are read as written by a
+newer version rather than as corruption.
 
 Divergences from the slice brief are recorded in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md),
 and per-slice status in [`docs/PROGRESS.md`](docs/PROGRESS.md).
