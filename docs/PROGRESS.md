@@ -6,6 +6,55 @@ file is the public record of what each slice actually delivered.
 
 ---
 
+## Slice 4 — durable ratification, and an exit for every open verdict
+
+**Status:** complete; review pending.
+
+**Delivered**
+
+- **Ratification is primary.** A `ratify` decision carries a `RequirementSnapshot`
+  (statement, provenance spans, extractor version). `apply_decisions` builds active
+  requirements from snapshots, not from fresh extraction, so a version bump can no longer
+  hide the ratified text. Decisions written before this slice have no snapshot; they are
+  reported orphaned with the reason, never promoted.
+- **Suppression.** A sketch is not proposed when a snapshot covers the same span in the
+  same observation or the same normalised statement in any observation. Counts and reasons
+  are shown in `settle`. A sketch proposing an anchor the snapshot lacks is attached as a
+  late anchor; a partial span overlap is shown as a possible successor and stays in the
+  queue.
+- **Attest.** `intentrace attest <req_id>` records one act that sets the full baseline.
+  The tool assigns the reason: `drift-accepted` (rationale required), `rename` or `move`
+  when a missing anchor is replaced, otherwise `late-anchor`. `why` shows the attestation
+  date, actor and reason.
+- **Rename proposals.** Anchors record a name-insensitive hash; `settle` proposes the
+  renamed symbol when exactly one same-file symbol matches. The hash erases the definition
+  name in the `def` line, recursive calls, `self.method` references and decorators.
+- **Every open verdict has an exit.** `settle` presents `unconfirmed` and `orphaned`
+  requirements as attest items, one at a time, before sketches. No batch attest.
+- **Unknown decision kinds** are read as written by a newer version, not corruption.
+- 95 tests (9 new in `tests/test_slice4.py`, including the three exit tests); ruff, ruff
+  format and `mypy --strict` clean.
+
+**Intentional behaviour changes**
+
+- A version bump no longer orphans a ratification written by this slice. The old
+  `test_version_bump_orphans_old_ratifications` is replaced by
+  `test_preslice4_ratification_is_reported_not_promoted`; the new behaviour is exit test 2
+  in `test_slice4.py`.
+- A ratified qualified anchor is pinned. Bare-name ambiguity introduced elsewhere no
+  longer turns a clean requirement `unconfirmed`; it cannot change what was ratified.
+  `test_why_shows_detached_anchor` became
+  `test_ratified_anchor_survives_extractor_ambiguity`.
+
+**Still incomplete (by design)**
+
+- Migration proposals for a changed extractor version (spec §14 criterion 4) are not
+  emitted; v0.1 keeps the ratified identity and suppresses the re-derived sketch.
+- Ratified requirements are still local (`.intentrace/log.jsonl`), not a tracked ledger.
+- No evidence links, so `satisfied` and `locked` remain unprintable.
+
+---
+
 ## FakeExtractor fake-v2 — splitter rework (migration event)
 
 **Status:** complete.

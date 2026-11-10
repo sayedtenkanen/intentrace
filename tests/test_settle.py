@@ -501,48 +501,51 @@ def _raise_eof(_prompt: str) -> str:
     raise EOFError
 
 
-def test_version_bump_orphans_old_ratifications(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Part B: a pre-bump ratification is reported orphaned, not dropped."""
-    import argparse
+def test_preslice4_ratification_is_reported_not_promoted(tmp_path: Path) -> None:
+    """A ratify decision with no snapshot is reported, never silently active.
 
-    import intentrace.cli as cli
-    import intentrace.extract.fake as fake_mod
+    Slice 2 wrote ratifications without a statement, so a version bump could
+    hide them. Slice 4 makes a snapshot primary; decisions already written
+    keep the old shape and orphan instead of being promoted.
+    """
     from intentrace.decisions import apply_decisions
     from intentrace.extract.fake import FakeExtractor
+    from intentrace.log import append_decision
+    from intentrace.models import Decision
     from intentrace.store import MemoryStore
     from intentrace.symbol import build_symbol_table
 
-    real_version = fake_mod.VERSION
-    assert real_version != "fake-v0"
     repo = make_repo(tmp_path)
+    req_id = extract_first_req_id(repo)
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={"app.py::total": "0" * 64},
+        ),
+    )
 
-    # Phase 1: ratify under the old extractor version.
-    monkeypatch.setattr(fake_mod, "VERSION", "fake-v0")
-    old_id = extract_first_req_id(repo)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
-    monkeypatch.chdir(repo)
-    assert cli.cmd_ratify(argparse.Namespace(req_id=old_id, actor="tester")) == 0
-
-    # Phase 2: the bumped extractor no longer produces that id.
-    monkeypatch.setattr(fake_mod, "VERSION", real_version)
-    monkeypatch.setattr("builtins.input", _raise_eof)
-    rc = cli.cmd_settle(argparse.Namespace(actor="tester"))
-    out, _ = capsys.readouterr()
-    assert rc == 0
-    assert "orphaned" in out.lower()
-    assert old_id[:8] in out
+    result = subprocess.run(
+        [sys.executable, "-m", "intentrace.cli", "settle"],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        input="",
+    )
+    assert result.returncode == 0
+    assert "orphaned" in result.stdout.lower()
+    assert req_id[:8] in result.stdout
 
     store = MemoryStore(repo)
-    assert len(store.all_decisions) == 1
+    symbols = build_symbol_table(repo)
     view = apply_decisions(
-        FakeExtractor()
-        .extract(store.all_observations, symbols=build_symbol_table(repo))
-        .requirements,
+        FakeExtractor().extract(store.all_observations, symbols=symbols).requirements,
         store.all_decisions,
+        symbols,
     )
-    assert [d.req_id for d in view.orphaned] == [old_id]
+    assert [d.req_id for d in view.orphaned] == [req_id]
     assert all(r.maturity == "sketch" for r in view.requirements)
 
 
@@ -672,21 +675,24 @@ def test_why_shows_orphaned_decision_fallback(tmp_path: Path) -> None:
     assert "eeeeeeee" in out.stdout
 
 
-def test_why_shows_detached_anchor(tmp_path: Path) -> None:
-    """T2: code unchanged but no longer attached reads unconfirmed, not clean."""
+def test_ratified_anchor_survives_extractor_ambiguity(tmp_path: Path) -> None:
+    """Slice 4: a ratified qualified anchor is pinned; a bare-name ambiguity
+    elsewhere does not un-ratify it or create a verdict with no exit."""
     repo = make_repo(tmp_path)
     req_id = extract_first_req_id(repo)
     assert ratify_cli(repo, req_id).returncode == 0
 
-    # A second `total` elsewhere makes the bare name ambiguous, so the
-    # extractor drops the anchor without any behaviour changing here.
+    # A second `total` elsewhere makes the bare name ambiguous, so fresh
+    # extraction would drop the anchor. The recorded path still resolves.
     (repo / "other.py").write_text("def total(items):\n    return sum(items)\n")
 
     out = why_cli(repo, "app.py:6")
     assert out.returncode == 0
     assert "R-" in out.stdout, "expected a populated requirement block"
-    assert "unconfirmed" in out.stdout
-    assert "no longer attached" in out.stdout
+    assert "unverified" in out.stdout
+    assert "unconfirmed" not in out.stdout
+    assert "orphaned" not in out.stdout
+    assert "app.py::total" in out.stdout
 
 
 ANCHORLESS_TEXT = "The system must never lose data."
@@ -777,7 +783,7 @@ def test_drift_details_stable_across_hash_seeds(tmp_path: Path) -> None:
         " symbol_path=p, node_kind='function_definition',"
         " node_hash='2' * 64)}) for p in paths];"
         "r1 = mk(paths, {p: '1' * 64 for p in paths});"
-        "r2 = mk([], {'app.py::zeta': '2' * 64, 'app.py::alpha': '2' * 64});"
+        "r2 = mk([], {'app.py::zeta': '1' * 64, 'app.py::alpha': '1' * 64});"
         "print([d.symbol_path for d in judge_requirement(r1, t).anchors]);"
         "print([d.symbol_path for d in judge_requirement(r2, t).anchors])"
     )
@@ -806,23 +812,28 @@ def test_record_ratification_rejects_concurrent_ratify(tmp_path: Path) -> None:
     """C1: a decision that landed after the view was built is not duplicated."""
     import intentrace.cli as cli
     from intentrace.log import append_decision
-    from intentrace.models import Decision
+    from intentrace.models import Decision, RequirementSnapshot, Span
     from intentrace.store import MemoryStore
 
     repo = make_repo(tmp_path)
     req_id = extract_first_req_id(repo)
+    snapshot = RequirementSnapshot(
+        statement="s",
+        provenance=[Span(obs_id="o", start=0, end=1)],
+        extractor_version="v",
+    )
 
-    recorded = cli._record_ratification(repo, req_id, "tester", "", {"a": "b"})
+    recorded = cli._record_ratification(repo, req_id, "tester", "", {"a": "b"}, {}, snapshot)
     assert recorded is not None
     assert recorded.req_id == req_id
     assert log_line_count(repo) == 2
 
     # A second process recorded while this one was deciding: the re-read
     # at record time must reject instead of appending a duplicate.
-    rival = Decision.create(kind="ratify", req_id="other", actor="rival")
+    rival = Decision.create(kind="ratify", req_id="other", actor="rival", snapshot=snapshot)
     append_decision(repo, rival)
     before = log_line_count(repo)
-    assert cli._record_ratification(repo, "other", "tester", "", {}) is None
+    assert cli._record_ratification(repo, "other", "tester", "", {}, {}, snapshot) is None
     assert log_line_count(repo) == before
     assert len(MemoryStore(repo).get_decisions("other")) == 1
 

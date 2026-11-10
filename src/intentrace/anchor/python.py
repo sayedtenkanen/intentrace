@@ -38,7 +38,7 @@ def symbol_path(file_path: str, node: tree_sitter.Node, source: bytes) -> str:
     return file_path + "::" + "::".join(parts) if parts else file_path
 
 
-def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
+def _normalize_subtree(node: tree_sitter.Node, source: bytes, rename: str | None = None) -> str:
     """Normalize a subtree for hashing: exclude comments, docstrings, and whitespace.
 
     Excludes:
@@ -47,6 +47,11 @@ def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
       of a function/class/module body)
 
     Preserves all other string literals (they are behaviour).
+
+    When ``rename`` is given, identifier tokens equal to it are replaced by a
+    placeholder. That erases the definition's own name from the `def` line, its
+    recursive calls, ``self.<name>`` references and decorators, so a rename
+    compares equal. Strings are untouched: only identifier nodes are replaced.
     """
     if node.type == "comment":
         return ""
@@ -59,11 +64,14 @@ def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
     parts: list[str] = []
 
     if node.child_count == 0:
-        # Leaf node — include token text
-        return source[node.start_byte : node.end_byte].decode()
+        # Leaf node — include token text, unless it is the name being erased.
+        text = source[node.start_byte : node.end_byte].decode()
+        if rename is not None and node.type == "identifier" and text == rename:
+            return "<name>"
+        return text
 
     for child in node.children:
-        normalized = _normalize_subtree(child, source)
+        normalized = _normalize_subtree(child, source, rename)
         if normalized:
             parts.append(normalized)
 
@@ -114,6 +122,20 @@ def _is_leading_docstring(node: tree_sitter.Node, source: bytes) -> bool:
 def node_hash(node: tree_sitter.Node, source: bytes) -> str:
     """Compute a hash of the normalized subtree."""
     normalized = _normalize_subtree(node, source)
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def node_name_hash(node: tree_sitter.Node, source: bytes) -> str:
+    """Hash a subtree with its own definition name erased.
+
+    Used only to propose a renamed symbol: two definitions whose bodies are
+    identical apart from their name (including recursive references) match.
+    """
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return node_hash(node, source)
+    bare = source[name_node.start_byte : name_node.end_byte].decode()
+    normalized = _normalize_subtree(node, source, rename=bare)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
@@ -172,6 +194,7 @@ def build_anchor(
         symbol_path=symbol_path(file_path, target, source),
         node_kind=target.type,
         node_hash=node_hash(target, source),
+        name_hash=node_name_hash(target, source),
     )
 
 

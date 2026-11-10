@@ -4,7 +4,8 @@ Commands:
   intentrace ingest <observations.jsonl>  — dev-only; appends observations to the log
   intentrace why <path>[:<line>]          — show intent covering that code
   intentrace ratify <req_id> [--actor]    — ratify one requirement as an obligation
-  intentrace settle [--actor]             — checkpoint: ratify or skip sketches one at a time
+  intentrace attest <req_id> [--anchor]   — record the exit for an open verdict
+  intentrace settle [--actor]             — checkpoint: attest open verdicts, then sketches
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from intentrace.anchor.python import (
     symbol_path,
 )
 from intentrace.decisions import (
+    Attached,
     ReqVerdict,
     Stale,
+    Suppressed,
     apply_decisions,
     check_fresh,
     judge_requirement,
@@ -33,7 +36,13 @@ from intentrace.decisions import (
 )
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import append_decision, append_observation, read_observations
-from intentrace.models import Decision, Observation, Requirement
+from intentrace.models import (
+    AnchorRef,
+    Decision,
+    Observation,
+    Requirement,
+    RequirementSnapshot,
+)
 from intentrace.store import MemoryStore
 from intentrace.symbol import SymbolTable, build_symbol_table
 
@@ -77,6 +86,9 @@ class _View:
     store: MemoryStore
     requirements: list[Requirement]  # annotated with maturity/ratification
     orphaned: list[Decision]
+    suppressed: list[Suppressed]
+    attached: list[Attached]
+    unknown: list[Decision]
     symbols: SymbolTable
 
 
@@ -97,7 +109,7 @@ def _load_view(repo_root: Path) -> _View | None:
         paths = ", ".join(candidates)
         print(f"warning: '{name}' resolves to multiple definitions: {paths}", file=sys.stderr)
 
-    view = apply_decisions(extraction.requirements, log_result.decisions)
+    view = apply_decisions(extraction.requirements, log_result.decisions, symbols)
 
     store = MemoryStore(repo_root)
     store.add_requirements(view.requirements)
@@ -107,6 +119,9 @@ def _load_view(repo_root: Path) -> _View | None:
         store=store,
         requirements=view.requirements,
         orphaned=view.orphaned,
+        suppressed=view.suppressed,
+        attached=view.attached,
+        unknown=view.unknown,
         symbols=symbols,
     )
 
@@ -178,6 +193,12 @@ def _format_requirement(req: Requirement, obs: Observation | None, verdict: ReqV
     if req.ratification is not None:
         rts = req.ratification.timestamp.strftime("%Y-%m-%d")
         lines.append(f"  ratified   {rts}  {req.ratification.actor}")
+        if req.ratification.attested_at is not None:
+            ats = req.ratification.attested_at.strftime("%Y-%m-%d")
+            lines.append(
+                f"  attested   {ats}  {req.ratification.attest_actor} · "
+                f"{req.ratification.attest_reason}"
+            )
     else:
         lines.append("  ratified   —")
 
@@ -195,10 +216,10 @@ def _format_requirement(req: Requirement, obs: Observation | None, verdict: ReqV
             )
         elif av.state == "missing":
             lines.append(f"  orphaned   anchor {av.symbol_path} no longer resolves")
-        elif av.state == "detached" and av.baseline_hash and av.current_hash:
+        elif av.state == "pending" and av.current_hash:
             lines.append(
-                f"  drift      {av.symbol_path}: no longer attached by extractor "
-                f"(baseline {av.baseline_hash[:8]}, current {av.current_hash[:8]})"
+                f"  pending    {av.symbol_path}: no baseline — attest to cover it "
+                f"(current {av.current_hash[:8]})"
             )
 
     if req.evidence:
@@ -244,6 +265,8 @@ def _record_ratification(
     actor: str,
     settle_id: str,
     baseline: dict[str, str],
+    baseline_name_hashes: dict[str, str],
+    snapshot: RequirementSnapshot,
 ) -> Decision | None:
     """Append a ratify decision unless one landed while deciding.
 
@@ -265,6 +288,8 @@ def _record_ratification(
         actor=actor,
         settle_id=settle_id,
         baseline_hashes=baseline,
+        baseline_name_hashes=baseline_name_hashes,
+        snapshot=snapshot,
     )
     append_decision(repo_root, decision)
     return decision
@@ -333,11 +358,191 @@ def cmd_ratify(args: argparse.Namespace) -> int:
         )
         return 1
 
-    decision = _record_ratification(repo_root, candidate.req_id, actor, "", outcome.baseline)
+    snapshot = RequirementSnapshot(
+        statement=candidate.statement,
+        provenance=candidate.provenance,
+        extractor_version=candidate.derivation.extractor_version,
+    )
+    decision = _record_ratification(
+        repo_root,
+        candidate.req_id,
+        actor,
+        "",
+        outcome.baseline,
+        outcome.baseline_name_hashes,
+        snapshot,
+    )
     if decision is None:
         print(f"{req_short} is already active — not recorded twice")
         return 0
     print(f"ratified {req_short}  baseline {len(outcome.baseline)} anchor(s)")
+    return 0
+
+
+@dataclass(frozen=True)
+class _AttestPlan:
+    """The baseline an attestation would record, and the reason it earns."""
+
+    baseline: dict[str, str]
+    name_baseline: dict[str, str]
+    reason: str
+    renamed: dict[str, str] = field(default_factory=dict)
+
+
+def _plan_attest(
+    req: Requirement, symbols: SymbolTable, extra_path: str | None = None
+) -> tuple[_AttestPlan | None, str]:
+    """Plan one attestation, or say why it cannot be planned.
+
+    The tool assigns the reason from what it observes: a changed body is
+    drift-accepted, a missing anchor replaced by a same-file match is a
+    rename (different file: move), and an anchor with no baseline is a late
+    anchor. The human cannot pick a cheaper reason.
+    """
+    if req.ratification is None:
+        return None, "not a ratified requirement"
+    baseline = req.ratification.baseline_hashes
+    names = req.ratification.baseline_name_hashes
+
+    changed = [
+        path
+        for path, old_hash in baseline.items()
+        if path in symbols.by_qualified and symbols.by_qualified[path].node_hash != old_hash
+    ]
+    missing = sorted(path for path in baseline if path not in symbols.by_qualified)
+
+    extra = None
+    if extra_path is not None:
+        extra = symbols.by_qualified.get(extra_path)
+        if extra is None:
+            return None, f"no symbol at {extra_path}"
+
+    anchors = {a.symbol_path: a for a in req.anchors}
+    renamed: dict[str, str] = {}
+
+    if missing:
+        if extra is not None:
+            if len(missing) > 1:
+                matches = [p for p in missing if names.get(p) == extra.name_hash]
+                if len(matches) != 1:
+                    return None, (
+                        "cannot tell which missing anchor this replaces; pass --anchor per anchor"
+                    )
+                old = matches[0]
+            else:
+                old = missing[0]
+            renamed[old] = extra.symbol_path
+            anchors[extra.symbol_path] = extra
+        else:
+            proposals: dict[str, AnchorRef] = {}
+            for old in missing:
+                file = old.split("::", 1)[0]
+                name_hash = names.get(old)
+                if not name_hash:
+                    return None, f"no rename hash recorded for {old}; pass --anchor"
+                candidates = [
+                    a
+                    for a in symbols.by_qualified.values()
+                    if a.file == file and a.name_hash == name_hash and a.symbol_path != old
+                ]
+                if len(candidates) != 1:
+                    return None, (f"{len(candidates)} rename candidates for {old}; pass --anchor")
+                proposals[old] = candidates[0]
+            resolved = {a.symbol_path for a in proposals.values()}
+            if len(resolved) != len(proposals):
+                return None, "rename candidates are not distinct; pass --anchor"
+            for old, anchor in proposals.items():
+                renamed[old] = anchor.symbol_path
+                anchors[anchor.symbol_path] = anchor
+    elif extra is not None:
+        anchors[extra.symbol_path] = extra
+
+    pending = sorted(path for path in anchors if path not in baseline)
+    if changed:
+        reason = "drift-accepted"
+    elif renamed:
+        same_file = all(
+            old.split("::", 1)[0] == new.split("::", 1)[0] for old, new in renamed.items()
+        )
+        reason = "rename" if same_file else "move"
+    elif pending:
+        reason = "late-anchor"
+    else:
+        return None, "nothing to attest"
+
+    return (
+        _AttestPlan(
+            baseline={path: anchor.node_hash for path, anchor in anchors.items()},
+            name_baseline={path: anchor.name_hash for path, anchor in anchors.items()},
+            reason=reason,
+            renamed=renamed,
+        ),
+        "",
+    )
+
+
+def cmd_attest(args: argparse.Namespace) -> int:
+    """Record the exit for an open verdict: late anchor, drift, rename or move."""
+    repo_root = _find_repo_root()
+    actor = args.actor or _default_actor()
+    view = _load_view(repo_root)
+    if view is None:
+        return 1
+
+    active = [r for r in view.requirements if r.maturity == "active"]
+    matches = match_req_id(args.req_id, active)
+    if not matches:
+        print(f"error: no active requirement with id '{args.req_id}'", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(
+            f"error: prefix '{args.req_id}' matches {len(matches)} requirements; be more specific",
+            file=sys.stderr,
+        )
+        return 1
+    req = matches[0]
+    req_short = f"R-{req.req_id[:8]}"
+
+    plan, error = _plan_attest(req, view.symbols, args.anchor)
+    if plan is None:
+        print(f"error: cannot attest {req_short}: {error}", file=sys.stderr)
+        return 1
+    rationale = args.rationale
+    if plan.reason == "drift-accepted" and not (rationale and rationale.strip()):
+        print(
+            "error: accepting drift requires --rationale",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        _format_requirement(
+            req,
+            _observation_for(view.store, req),
+            judge_requirement(req, view.symbols),
+        )
+    )
+    print()
+    for old, new in sorted(plan.renamed.items()):
+        print(f"  propose    {old} → {new}")
+    print(f"  attest     {plan.reason}: {', '.join(sorted(plan.baseline)) or '—'}")
+    print()
+    answer = _ask(f"Attest {req_short}? [y/N] ")
+    if answer is None or answer.strip().lower() not in ("y", "yes"):
+        print("not attested")
+        return 0
+
+    decision = Decision.create(
+        kind="attest",
+        req_id=req.req_id,
+        actor=actor,
+        rationale=rationale,
+        baseline_hashes=plan.baseline,
+        baseline_name_hashes=plan.name_baseline,
+        reason=plan.reason,
+    )
+    append_decision(repo_root, decision)
+    print(f"attested {req_short} ({plan.reason})")
     return 0
 
 
@@ -360,6 +565,89 @@ def cmd_settle(args: argparse.Namespace) -> int:
             )
         print()
 
+    if view.unknown:
+        print("decisions recorded by a newer version (ignored):")
+        for d in view.unknown:
+            ts = d.timestamp.strftime("%Y-%m-%d")
+            print(f"  R-{d.req_id[:8]} {d.kind} by {d.actor} on {ts}")
+        print()
+
+    settle_id = datetime.now(UTC).strftime("settle-%Y%m%dT%H%M%S%f")
+    ratified = 0
+    skipped = 0
+    attested = 0
+
+    open_items = []
+    for req in view.requirements:
+        if req.maturity != "active":
+            continue
+        verdict = judge_requirement(req, view.symbols)
+        if verdict.status in ("unconfirmed", "orphaned"):
+            open_items.append((req, verdict))
+
+    if open_items:
+        print("open verdicts to attest:")
+        for req, verdict in open_items:
+            req_short = f"R-{req.req_id[:8]}"
+            print(_format_requirement(req, _observation_for(view.store, req), verdict))
+            plan, error = _plan_attest(req, view.symbols)
+            if plan is None:
+                print(
+                    f"  manual attest required: intentrace attest {req_short} "
+                    f"--anchor <symbol_path>"
+                )
+                print(f"  ({error})")
+                print()
+                skipped += 1
+                continue
+            for old, new in sorted(plan.renamed.items()):
+                print(f"  propose    {old} → {new}")
+            print(f"  proposed   {plan.reason}: {', '.join(sorted(plan.baseline)) or '—'}")
+            answer = _ask(f"Attest {req_short}? [y(es)/N(o)/q(uit)] ")
+            if answer is None or answer.strip().lower() in ("q", "quit"):
+                print(
+                    f"settle stopped: {attested} attested, {ratified} ratified, {skipped} skipped."
+                )
+                return 0
+            if answer.strip().lower() not in ("y", "yes"):
+                skipped += 1
+                continue
+            rationale = None
+            if plan.reason == "drift-accepted":
+                rationale = _ask("Rationale for accepting the drift: ")
+                if rationale is None or not rationale.strip():
+                    print("not attested — a rationale is required for drift")
+                    skipped += 1
+                    continue
+            append_decision(
+                repo_root,
+                Decision.create(
+                    kind="attest",
+                    req_id=req.req_id,
+                    actor=actor,
+                    settle_id=settle_id,
+                    rationale=rationale,
+                    baseline_hashes=plan.baseline,
+                    baseline_name_hashes=plan.name_baseline,
+                    reason=plan.reason,
+                ),
+            )
+            print(f"attested {req_short} ({plan.reason})")
+            attested += 1
+        print()
+
+    if view.suppressed:
+        print(f"suppressed sketches: {len(view.suppressed)} — already covered by a ratification")
+        for s in view.suppressed:
+            print(f'  R-{s.snapshot_req_id[:8]} covers "{s.sketch.statement[:50]}" ({s.reason})')
+        print()
+
+    if view.attached:
+        print(f"attached sketches: {len(view.attached)} — shown, not proposed as new")
+        for a in view.attached:
+            print(f'  R-{a.snapshot_req_id[:8]} · {a.reason}: "{a.sketch.statement[:50]}"')
+        print()
+
     sketches = [r for r in view.requirements if r.maturity == "sketch"]
     unimplemented = [r for r in view.requirements if r.maturity == "active" and not r.anchors]
     if unimplemented:
@@ -373,9 +661,6 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print("nothing to settle — no unratified sketches")
         return 0
 
-    settle_id = datetime.now(UTC).strftime("settle-%Y%m%dT%H%M%S%f")
-    ratified = 0
-    skipped = 0
     for sketch in sketches:
         req_short = f"R-{sketch.req_id[:8]}"
         print(
@@ -387,7 +672,7 @@ def cmd_settle(args: argparse.Namespace) -> int:
         )
         answer = _ask(f"Ratify {req_short}? [y(es)/N(o)/q(uit)] ")
         if answer is None or answer.strip().lower() in ("q", "quit"):
-            print(f"settle stopped: {ratified} ratified, {skipped} skipped.")
+            print(f"settle stopped: {attested} attested, {ratified} ratified, {skipped} skipped.")
             return 0
         if answer.strip().lower() not in ("y", "yes"):
             skipped += 1
@@ -414,8 +699,19 @@ def cmd_settle(args: argparse.Namespace) -> int:
             )
             skipped += 1
             continue
+        snapshot = RequirementSnapshot(
+            statement=sketch.statement,
+            provenance=sketch.provenance,
+            extractor_version=sketch.derivation.extractor_version,
+        )
         decision = _record_ratification(
-            repo_root, sketch.req_id, actor, settle_id, outcome.baseline
+            repo_root,
+            sketch.req_id,
+            actor,
+            settle_id,
+            outcome.baseline,
+            outcome.baseline_name_hashes,
+            snapshot,
         )
         if decision is None:
             print(f"{req_short} became active while confirming — skipped.")
@@ -424,7 +720,7 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print(f"ratified {req_short}")
         ratified += 1
 
-    print(f"settle done: {ratified} ratified, {skipped} skipped.")
+    print(f"settle done: {attested} attested, {ratified} ratified, {skipped} skipped.")
     return 0
 
 
@@ -552,9 +848,28 @@ def main() -> int:
         "--actor", default=None, help="who is ratifying (defaults to login name)"
     )
 
-    # settle — checkpoint; presents sketches one at a time
+    # attest — the recorded exit for a late anchor, drift, rename or move
+    attest_parser = subparsers.add_parser(
+        "attest", help="Record the exit for an open verdict (late anchor, drift, rename)"
+    )
+    attest_parser.add_argument("req_id", help="req_id or unique prefix of an active requirement")
+    attest_parser.add_argument(
+        "--anchor",
+        default=None,
+        help="qualified symbol path to attest onto (defaults to a unique rename candidate)",
+    )
+    attest_parser.add_argument(
+        "--rationale",
+        default=None,
+        help="why drift is accepted (required when a body hash changed)",
+    )
+    attest_parser.add_argument(
+        "--actor", default=None, help="who is attesting (defaults to login name)"
+    )
+
+    # settle — checkpoint; presents open verdicts and sketches one at a time
     settle_parser = subparsers.add_parser(
-        "settle", help="Checkpoint: ratify or skip sketches one at a time"
+        "settle", help="Checkpoint: attest open verdicts, then ratify or skip sketches"
     )
     settle_parser.add_argument(
         "--actor", default=None, help="who is ratifying (defaults to login name)"
@@ -572,6 +887,8 @@ def main() -> int:
         return cmd_why(args)
     elif args.command == "ratify":
         return cmd_ratify(args)
+    elif args.command == "attest":
+        return cmd_attest(args)
     elif args.command == "settle":
         return cmd_settle(args)
 
