@@ -10,6 +10,7 @@ from intentrace.log import (
     CorruptLineError,
     TornLineError,
     append_observation,
+    log_lock,
     read_observations,
 )
 from intentrace.models import Observation
@@ -99,6 +100,59 @@ def test_corrupt_mid_file_line_reported(repo_root: Path) -> None:
     assert result.corrupt_line.line_number == 2
     # Only the first good observation was parsed before corruption
     assert len(result.observations) == 1
+
+
+def test_append_repairs_a_torn_tail_instead_of_corrupting_the_log(
+    repo_root: Path,
+) -> None:
+    """A partial write must not turn every later append into corruption.
+
+    An interrupted process can leave bytes with no terminating newline.
+    The next append truncates that partial record first, so the log keeps
+    the records that completed and gains the new one.
+    """
+    append_observation(repo_root, _make_obs("before"))
+
+    log_file = repo_root / ".intentrace" / "log.jsonl"
+    with open(log_file, "a") as f:
+        f.write('{"obs_id":"partial","session_id":"s1"')  # interrupted, no newline
+
+    append_observation(repo_root, _make_obs("after", turn=1))
+
+    result = read_observations(repo_root)
+    assert result.corrupt_line is None
+    assert result.torn_line is None
+    assert [o.text for o in result.observations] == ["before", "after"]
+    assert log_file.read_bytes().endswith(b"\n")
+
+
+def test_log_lock_is_reentrant(repo_root: Path) -> None:
+    """A caller may hold the lock and still append through the normal API."""
+    with log_lock(repo_root):
+        append_observation(repo_root, _make_obs("inside"))
+
+    result = read_observations(repo_root)
+    assert [o.text for o in result.observations] == ["inside"]
+
+
+def test_concurrent_appends_do_not_interleave(repo_root: Path) -> None:
+    """Threads sharing a repo serialize appends; no line is torn."""
+    import threading
+
+    def write(index: int) -> None:
+        for turn in range(10):
+            append_observation(repo_root, _make_obs(f"t{index}-{turn}", turn=turn))
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    result = read_observations(repo_root)
+    assert result.corrupt_line is None
+    assert result.torn_line is None
+    assert len(result.observations) == 40
 
 
 def test_empty_log(repo_root: Path) -> None:

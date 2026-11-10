@@ -6,9 +6,15 @@ One complete JSON object per line, append-only, never rewritten.
 
 from __future__ import annotations
 
+import importlib
 import json
+import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 from intentrace.models import Decision, Observation
 
@@ -45,20 +51,100 @@ def _log_path(repo_root: Path) -> Path:
     return repo_root / ".intentrace" / "log.jsonl"
 
 
-def append_observation(repo_root: Path, obs: Observation) -> None:
-    """Append a single observation to the log."""
+_lock_state = threading.local()
+
+
+@contextmanager
+def log_lock(repo_root: Path) -> Iterator[None]:
+    """Serialize appends and check-then-append sequences across processes.
+
+    A lock file beside the log carries an advisory exclusive lock. The lock
+    is re-entrant within a thread, so a caller can hold it across a re-read
+    and still call append_observation/append_decision. Platforms without
+    fcntl/msvcrt fall back to in-process serialization only.
+    """
+    depth = getattr(_lock_state, "depth", 0)
+    if depth:
+        _lock_state.depth = depth + 1
+        try:
+            yield
+        finally:
+            _lock_state.depth -= 1
+        return
+
+    lock_path = repo_root / ".intentrace" / "log.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        _acquire_lock(lock_file)
+        _lock_state.depth = 1
+        try:
+            yield
+        finally:
+            _lock_state.depth = 0
+            _release_lock(lock_file)
+
+
+def _acquire_lock(lock_file: BinaryIO) -> None:
+    if sys.platform == "win32":
+        msvcrt = importlib.import_module("msvcrt")
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    try:
+        fcntl = importlib.import_module("fcntl")
+    except ImportError:  # pragma: no cover - non-POSIX, non-Windows
+        return
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+
+def _release_lock(lock_file: BinaryIO) -> None:
+    if sys.platform == "win32":
+        msvcrt = importlib.import_module("msvcrt")
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    try:
+        fcntl = importlib.import_module("fcntl")
+    except ImportError:  # pragma: no cover - non-POSIX, non-Windows
+        return
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _truncate_torn_tail(log_file: Path) -> None:
+    """Drop a final record that was not terminated by a newline.
+
+    An interrupted append leaves partial bytes at the end. Appending after
+    those bytes would make a syntactically complete but invalid record, which
+    the reader reports as corruption. Truncating the partial record first
+    keeps the next append readable.
+    """
+    if not log_file.exists():
+        return
+    data = log_file.read_bytes()
+    if not data or data.endswith(b"\n"):
+        return
+    cut = data.rfind(b"\n") + 1
+    with open(log_file, "r+b") as f:
+        f.truncate(cut)
+
+
+def _append_line(repo_root: Path, line: str) -> None:
     log_file = _log_path(repo_root)
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(obs.model_dump_json() + "\n")
+    with log_lock(repo_root):
+        _truncate_torn_tail(log_file)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+def append_observation(repo_root: Path, obs: Observation) -> None:
+    """Append a single observation to the log."""
+    _append_line(repo_root, obs.model_dump_json() + "\n")
 
 
 def append_decision(repo_root: Path, decision: Decision) -> None:
     """Append a single decision to the log (immutable; never rewritten)."""
-    log_file = _log_path(repo_root)
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    _append_line(repo_root, decision.model_dump_json() + "\n")
 
 
 def _iter_lines(log_file: Path) -> list[str]:

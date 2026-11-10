@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from intentrace.models import (
+    ATTEST_REASONS,
     AnchorRef,
     Decision,
     Derivation,
@@ -58,10 +59,22 @@ class DecisionView:
     unknown: list[Decision] = field(default_factory=list)
 
 
-def _resolve_paths(paths: list[str], symbols: SymbolTable | None) -> list[AnchorRef]:
-    if symbols is None:
-        return []
+def _resolve_paths(paths: list[str], symbols: SymbolTable) -> list[AnchorRef]:
     return [symbols.by_qualified[p] for p in paths if p in symbols.by_qualified]
+
+
+def _is_valid_attestation(decision: Decision) -> bool:
+    """Defensive replay check, mirroring the Decision model validator.
+
+    The model rejects malformed attestations at the boundary; this keeps a
+    record that bypassed validation (or was written by a future version)
+    from replacing a trusted baseline.
+    """
+    if decision.reason not in ATTEST_REASONS:
+        return False
+    return decision.reason != "drift-accepted" or bool(
+        decision.rationale and decision.rationale.strip()
+    )
 
 
 def _spans_overlap(sketch: Requirement, active: Requirement) -> bool:
@@ -83,26 +96,26 @@ def _same_span(sketch: Requirement, active: Requirement) -> bool:
 def apply_decisions(
     requirements: list[Requirement],
     decisions: list[Decision],
-    symbols: SymbolTable | None = None,
+    symbols: SymbolTable,
 ) -> DecisionView:
     """Build the view: ratified snapshots, re-derived sketches, and set-asides.
 
-    A ratify decision is primary only if it carries a snapshot. Decisions
-    written before slice 4 have none; they are reported orphaned with the
-    reason, never silently promoted. A sketch is suppressed when a snapshot
-    already covers the same span or the same normalised statement. A sketch
-    proposing an anchor the snapshot lacks is attached as a late anchor; a
-    partial span overlap is attached as a possible successor.
+    The symbol table is required: replay must resolve recorded baselines to
+    anchors. Callers that omit it would silently produce active
+    requirements with no anchors, which is indistinguishable from code that
+    vanished. A ratify decision is primary only if it carries a snapshot.
+    Decisions written before slice 4 have none; they are reported orphaned
+    with the reason, never silently promoted. A sketch is suppressed when a
+    snapshot already covers the same span or the same normalised statement.
+    A sketch proposing an anchor the snapshot lacks is attached as a late
+    anchor; a partial span overlap is attached as a possible successor.
     """
     ratifies: dict[str, list[Decision]] = {}
-    attests: dict[str, list[Decision]] = {}
     unknown: list[Decision] = []
 
     for d in decisions:
         if d.kind == "ratify":
             ratifies.setdefault(d.req_id, []).append(d)
-        elif d.kind == "attest":
-            attests.setdefault(d.req_id, []).append(d)
         elif d.kind not in KNOWN_DECISION_KINDS:
             unknown.append(d)
 
@@ -110,7 +123,10 @@ def apply_decisions(
     legacy_orphans: list[Decision] = []
 
     for req_id, records in ratifies.items():
-        snapshot_decision = next((d for d in records if d.snapshot is not None), None)
+        # The most recent snapshot-bearing ratify wins. A re-ratification is
+        # a later human act; selecting the first would silently keep a stale
+        # baseline.
+        snapshot_decision = next((d for d in reversed(records) if d.snapshot is not None), None)
         if snapshot_decision is None:
             legacy_orphans.extend(records)
             continue
@@ -119,9 +135,17 @@ def apply_decisions(
         baseline = dict(snapshot_decision.baseline_hashes)
         name_baseline = dict(snapshot_decision.baseline_name_hashes)
         last_attest: Decision | None = None
-        for attest in attests.get(req_id, []):
+        # Only attestations recorded after this ratification may replace its
+        # baseline. An older attestation belongs to a superseded ratification.
+        start = decisions.index(snapshot_decision) + 1
+        for attest in decisions[start:]:
+            if attest.kind != "attest" or attest.req_id != req_id:
+                continue
             # An attestation always replaces the baseline, including with an
-            # empty one: that is how a deleted anchor is acknowledged.
+            # empty one: that is how a deleted anchor is acknowledged. A
+            # malformed attestation never replaces a trusted baseline.
+            if not _is_valid_attestation(attest):
+                continue
             baseline = dict(attest.baseline_hashes)
             name_baseline = dict(attest.baseline_name_hashes)
             last_attest = attest

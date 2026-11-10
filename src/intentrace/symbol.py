@@ -56,6 +56,9 @@ class SymbolTable:
 
     by_qualified: dict[str, AnchorRef] = field(default_factory=dict)
     by_bare: dict[str, list[AnchorRef]] = field(default_factory=dict)
+    # Files that could not be read. An incomplete scan must not be mistaken
+    # for code that vanished: callers that attest or judge fail closed.
+    scan_errors: dict[str, str] = field(default_factory=dict)
 
     def resolve(self, name: str) -> Resolution:
         """Resolve a bare symbol name.
@@ -93,19 +96,25 @@ class SymbolTable:
 
 
 def build_symbol_table(repo_root: Path) -> SymbolTable:
-    """Scan all Python files and build a symbol table keyed by qualified path."""
+    """Scan all Python files and build a symbol table keyed by qualified path.
+
+    A file that cannot be read is recorded on ``scan_errors`` rather than
+    silently skipped. Callers must treat a non-empty map as an incomplete
+    scan: otherwise a transient read failure looks like deleted code.
+    """
     table = SymbolTable()
     for py_file in repo_root.rglob("*.py"):
         if ".venv" in py_file.parts or "__pycache__" in py_file.parts:
             continue
+        repo_rel = str(py_file.relative_to(repo_root))
         try:
             source = py_file.read_bytes()
-        except OSError:
+        except OSError as exc:
+            table.scan_errors[repo_rel] = str(exc)
             continue
         tree = parse_source(source)
         if not isinstance(tree, tree_sitter.Tree):
             continue
-        repo_rel = str(py_file.relative_to(repo_root))
         _collect_symbols(tree, repo_rel, source, table)
     return table
 

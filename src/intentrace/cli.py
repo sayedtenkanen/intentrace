@@ -35,13 +35,19 @@ from intentrace.decisions import (
     match_req_id,
 )
 from intentrace.extract.fake import FakeExtractor
-from intentrace.log import append_decision, append_observation, read_observations
+from intentrace.log import (
+    append_decision,
+    append_observation,
+    log_lock,
+    read_observations,
+)
 from intentrace.models import (
     AnchorRef,
     Decision,
     Observation,
     Requirement,
     RequirementSnapshot,
+    _normalize_for_hash,
 )
 from intentrace.store import MemoryStore
 from intentrace.symbol import SymbolTable, build_symbol_table
@@ -92,6 +98,24 @@ class _View:
     symbols: SymbolTable
 
 
+def _report_scan_errors(symbols: SymbolTable) -> bool:
+    """Say whether the scan is complete; print why it is not.
+
+    A file that could not be read must never look like deleted code. Every
+    path that attests or judges anchors fails closed when this returns
+    False.
+    """
+    if not symbols.scan_errors:
+        return True
+    for path, message in sorted(symbols.scan_errors.items()):
+        print(f"error: cannot read {path}: {message}", file=sys.stderr)
+    print(
+        "error: symbol scan is incomplete; refusing to judge or replace anchors",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _load_view(repo_root: Path) -> _View | None:
     """Read the log, re-extract, replay decisions. None on corrupt log."""
     log_result = read_observations(repo_root)
@@ -102,6 +126,8 @@ def _load_view(repo_root: Path) -> _View | None:
         return None
 
     symbols = build_symbol_table(repo_root)
+    if not _report_scan_errors(symbols):
+        return None
     extractor = FakeExtractor()
     extraction = extractor.extract(log_result.observations, symbols=symbols)
 
@@ -280,35 +306,102 @@ def _record_ratification(
 ) -> Decision | None:
     """Append a ratify decision unless one landed while deciding.
 
-    Re-reads the log immediately before appending: a requirement that
-    became active after the view was built (a concurrent ratify or settle)
-    is rejected instead of recorded twice. Returns the appended decision,
-    or None if the requirement is already active.
+    The log lock is held across the re-read and the append, so two
+    processes cannot both pass the check. Only one snapshot-bearing ratify
+    may make a requirement active; a decision written before snapshots
+    existed does not block re-ratifying. A different requirement with the
+    same normalised statement is also refused: separate observations
+    produce different ids, and ratifying both would persist duplicates.
 
-    This closes the minutes-scale window of a human answering a prompt,
-    not a microsecond-scale race: read-check-append is not atomic, and no
-    file lock is taken (the log must stay portable across platforms).
+    Returns the appended decision, or None when the requirement became
+    covered while the human was deciding.
     """
-    fresh = read_observations(repo_root)
-    # Only a snapshot-bearing ratify makes a requirement active. A decision
-    # written before snapshots existed must not block re-ratifying the same
-    # sketch: that would leave an orphaned requirement with no exit.
-    if any(
-        d.kind == "ratify" and d.req_id == req_id and d.snapshot is not None
-        for d in fresh.decisions
-    ):
-        return None
-    decision = Decision.create(
-        kind="ratify",
-        req_id=req_id,
-        actor=actor,
-        settle_id=settle_id,
-        baseline_hashes=baseline,
-        baseline_name_hashes=baseline_name_hashes,
-        snapshot=snapshot,
-    )
-    append_decision(repo_root, decision)
-    return decision
+    with log_lock(repo_root):
+        fresh = read_observations(repo_root)
+        if fresh.corrupt_line is not None:
+            return None
+        # Only a snapshot-bearing ratify makes a requirement active. A decision
+        # written before snapshots existed must not block re-ratifying the same
+        # sketch: that would leave an orphaned requirement with no exit.
+        if any(
+            d.kind == "ratify" and d.req_id == req_id and d.snapshot is not None
+            for d in fresh.decisions
+        ):
+            return None
+        statement = _normalize_for_hash(snapshot.statement)
+        for d in fresh.decisions:
+            if (
+                d.kind == "ratify"
+                and d.req_id != req_id
+                and d.snapshot is not None
+                and _normalize_for_hash(d.snapshot.statement) == statement
+            ):
+                return None
+        decision = Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor=actor,
+            settle_id=settle_id,
+            baseline_hashes=baseline,
+            baseline_name_hashes=baseline_name_hashes,
+            snapshot=snapshot,
+        )
+        append_decision(repo_root, decision)
+        return decision
+
+
+def _record_attestation(
+    repo_root: Path,
+    req_id: str,
+    anchors: list[str] | None,
+    expected: _AttestPlan,
+    actor: str,
+    settle_id: str,
+    rationale: str | None,
+) -> tuple[Decision | None, str]:
+    """Plan again and append under the log lock.
+
+    The human may take minutes to answer. Code or another attestation can
+    change in that window; recording the plan made before the prompt would
+    replace a newer acknowledged baseline with a stale one. Re-read, rescan
+    and re-plan; accept only a plan identical to the one shown.
+
+    Returns the appended decision, or None and the reason it was refused.
+    """
+    with log_lock(repo_root):
+        fresh = read_observations(repo_root)
+        if fresh.corrupt_line is not None:
+            return None, "the log became corrupt while deciding"
+        symbols = build_symbol_table(repo_root)
+        if not _report_scan_errors(symbols):
+            return None, "the symbol scan is incomplete"
+        extraction = FakeExtractor().extract(fresh.observations, symbols=symbols)
+        current = apply_decisions(extraction.requirements, fresh.decisions, symbols)
+        req = next(
+            (r for r in current.requirements if r.req_id == req_id and r.maturity == "active"),
+            None,
+        )
+        if req is None:
+            return None, "the requirement is no longer active"
+        plan, error = _plan_attest(req, symbols, anchors)
+        if plan is None:
+            return None, error
+        if (plan.baseline, plan.reason) != (expected.baseline, expected.reason):
+            return None, "code or the recorded baseline changed while deciding; re-run attest"
+        if plan.reason == "drift-accepted" and not (rationale and rationale.strip()):
+            return None, "accepting drift requires --rationale"
+        decision = Decision.create(
+            kind="attest",
+            req_id=req_id,
+            actor=actor,
+            settle_id=settle_id,
+            rationale=rationale,
+            baseline_hashes=plan.baseline,
+            baseline_name_hashes=plan.name_baseline,
+            reason=plan.reason,
+        )
+        append_decision(repo_root, decision)
+        return decision, ""
 
 
 def cmd_ratify(args: argparse.Namespace) -> int:
@@ -355,6 +448,8 @@ def cmd_ratify(args: argparse.Namespace) -> int:
     # proposal. Re-extraction (not just a hash comparison) catches anchors
     # the extractor would no longer attach, e.g. newly ambiguous names.
     fresh_symbols = build_symbol_table(repo_root)
+    if not _report_scan_errors(fresh_symbols):
+        return 1
     fresh_reqs = (
         FakeExtractor().extract(view.store.all_observations, symbols=fresh_symbols).requirements
     )
@@ -406,6 +501,55 @@ class _AttestPlan:
     dropped: list[str] = field(default_factory=list)
 
 
+def _assign_replacements(
+    missing: list[str],
+    extras: list[AnchorRef],
+    names: dict[str, str],
+) -> dict[str, AnchorRef] | None:
+    """Map each supplied --anchor to the missing anchor it replaces.
+
+    Unambiguous name-hash matches are assigned first. The remainder must
+    match as a complete multiset of name hashes, so duplicate hashes do not
+    block a plan when the caller supplied one replacement per missing
+    anchor. A single missing anchor and a single replacement are accepted
+    even when their hashes differ; the caller classifies that as drift.
+
+    Returns None when the mapping is genuinely ambiguous.
+    """
+    assigned: dict[str, AnchorRef] = {}
+    remaining = list(extras)
+
+    while remaining:
+        found = False
+        for extra in remaining:
+            matches = [
+                old for old in missing if old not in assigned and names.get(old) == extra.name_hash
+            ]
+            if len(matches) == 1:
+                assigned[matches[0]] = extra
+                remaining.remove(extra)
+                found = True
+                break
+        if not found:
+            break
+
+    if not remaining:
+        return assigned
+
+    remaining_missing = [old for old in missing if old not in assigned]
+    if len(remaining_missing) == 1 and len(remaining) == 1:
+        assigned[remaining_missing[0]] = remaining[0]
+        return assigned
+
+    by_name = sorted(remaining_missing, key=lambda old: (names.get(old) or "", old))
+    by_extra = sorted(remaining, key=lambda extra: (extra.name_hash, extra.symbol_path))
+    if [names.get(old) for old in by_name] != [extra.name_hash for extra in by_extra]:
+        return None
+    for old, extra in zip(by_name, by_extra, strict=True):
+        assigned[old] = extra
+    return assigned
+
+
 def _plan_attest(
     req: Requirement, symbols: SymbolTable, extra_paths: list[str] | None = None
 ) -> tuple[_AttestPlan | None, str]:
@@ -450,6 +594,7 @@ def _plan_attest(
     anchors = {a.symbol_path: a for a in req.anchors}
     renamed: dict[str, str] = {}
     dropped: list[str] = []
+    body_changed = False
 
     if missing:
         if extras:
@@ -457,24 +602,20 @@ def _plan_attest(
                 return None, (
                     f"{len(missing)} anchor(s) are missing; pass one --anchor per missing anchor"
                 )
-            remaining = list(missing)
-            assigned: dict[str, AnchorRef] = {}
-            for extra in extras:
-                matches = [old for old in remaining if names.get(old) == extra.name_hash]
-                if len(matches) == 1:
-                    old = matches[0]
-                elif len(missing) == 1 and len(extras) == 1:
-                    old = missing[0]
-                else:
-                    return None, (
-                        f"cannot tell which missing anchor --anchor {extra.symbol_path} "
-                        "replaces; pass one --anchor per missing anchor"
-                    )
-                assigned[old] = extra
-                remaining.remove(old)
+            assigned = _assign_replacements(missing, extras, names)
+            if assigned is None:
+                return None, (
+                    "cannot tell which missing anchor each --anchor replaces; "
+                    "pass one --anchor per missing anchor"
+                )
             for old, anchor in assigned.items():
                 renamed[old] = anchor.symbol_path
                 anchors[anchor.symbol_path] = anchor
+                # A replacement whose name-insensitive hash differs has a
+                # modified body. That is drift, not a clean rename, and must
+                # carry the rationale drift requires.
+                if names.get(old) != anchor.name_hash:
+                    body_changed = True
         else:
             proposals: dict[str, AnchorRef] = {}
             for old in missing:
@@ -504,9 +645,10 @@ def _plan_attest(
             anchors[extra.symbol_path] = extra
 
     pending = sorted(path for path in anchors if path not in baseline)
-    # A vanished anchor with no replacement is accepted drift: the human
-    # acknowledges that the implementation is gone, and must give a reason.
-    if changed or dropped:
+    # A vanished anchor with no replacement, or a replacement whose body
+    # changed, is accepted drift: the human acknowledges it and must give a
+    # reason.
+    if changed or dropped or body_changed:
         reason = "drift-accepted"
     elif renamed:
         same_file = all(
@@ -583,17 +725,19 @@ def cmd_attest(args: argparse.Namespace) -> int:
         print("not attested")
         return 0
 
-    decision = Decision.create(
-        kind="attest",
-        req_id=req.req_id,
-        actor=actor,
-        rationale=rationale,
-        baseline_hashes=plan.baseline,
-        baseline_name_hashes=plan.name_baseline,
-        reason=plan.reason,
+    decision, refusal = _record_attestation(
+        repo_root,
+        req.req_id,
+        args.anchor,
+        plan,
+        actor,
+        "",
+        rationale,
     )
-    append_decision(repo_root, decision)
-    print(f"attested {req_short} ({plan.reason})")
+    if decision is None:
+        print(f"error: cannot attest {req_short}: {refusal}", file=sys.stderr)
+        return 1
+    print(f"attested {req_short} ({decision.reason})")
     return 0
 
 
@@ -672,20 +816,20 @@ def cmd_settle(args: argparse.Namespace) -> int:
                     print("not attested — a rationale is required for drift")
                     skipped += 1
                     continue
-            append_decision(
+            decision, refusal = _record_attestation(
                 repo_root,
-                Decision.create(
-                    kind="attest",
-                    req_id=req.req_id,
-                    actor=actor,
-                    settle_id=settle_id,
-                    rationale=rationale,
-                    baseline_hashes=plan.baseline,
-                    baseline_name_hashes=plan.name_baseline,
-                    reason=plan.reason,
-                ),
+                req.req_id,
+                None,
+                plan,
+                actor,
+                settle_id,
+                rationale,
             )
-            print(f"attested {req_short} ({plan.reason})")
+            if decision is None:
+                print(f"cannot attest {req_short}: {refusal}")
+                skipped += 1
+                continue
+            print(f"attested {req_short} ({decision.reason})")
             attested += 1
         print()
 
@@ -721,8 +865,18 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print("nothing to settle — no unratified sketches")
         return 0
 
+    ratified_statements: set[str] = set()
     for sketch in sketches:
         req_short = f"R-{sketch.req_id[:8]}"
+        statement = _normalize_for_hash(sketch.statement)
+        # Two observations can yield the same statement with different ids.
+        # The first ratification in this run covers the rest: re-checking
+        # the log inside _record_ratification would otherwise prompt the
+        # human for a duplicate that is then refused.
+        if statement in ratified_statements:
+            print(f"{req_short} already covered by a statement ratified in this run — skipped.")
+            skipped += 1
+            continue
         print(
             _format_requirement(
                 sketch,
@@ -738,6 +892,9 @@ def cmd_settle(args: argparse.Namespace) -> int:
             skipped += 1
             continue
         fresh_symbols = build_symbol_table(repo_root)
+        if not _report_scan_errors(fresh_symbols):
+            skipped += 1
+            continue
         fresh_reqs = (
             FakeExtractor()
             .extract(view.store.all_observations, symbols=fresh_symbols)
@@ -774,11 +931,12 @@ def cmd_settle(args: argparse.Namespace) -> int:
             snapshot,
         )
         if decision is None:
-            print(f"{req_short} became active while confirming — skipped.")
+            print(f"{req_short} became active or was covered while confirming — skipped.")
             skipped += 1
             continue
         print(f"ratified {req_short}")
         ratified += 1
+        ratified_statements.add(statement)
 
     print(f"settle done: {attested} attested, {ratified} ratified, {skipped} skipped.")
     return 0
@@ -851,10 +1009,10 @@ def cmd_why(args: argparse.Namespace) -> int:
                 found.append((req, _observation_for(view.store, req), verdict))
                 seen_reqs.add(req.req_id)
 
-    # Fallback: when nothing matches, surface active requirements and
-    # orphaned decisions whose ratified baseline concerns this file but no
-    # longer resolves cleanly. A ratified decision about this code must
-    # never hide behind "no intent covers this code" (I4).
+    # Fallback: when nothing matches, surface active requirements whose
+    # ratified baseline concerns this file but no longer resolves cleanly.
+    # A ratified decision about this code must never hide behind "no intent
+    # covers this code" (I4).
     fallback_decisions: list[Decision] = []
     if not found:
         for req in view.requirements:
@@ -870,9 +1028,13 @@ def cmd_why(args: argparse.Namespace) -> int:
                 continue
             found.append((req, _observation_for(view.store, req), verdict))
             seen_reqs.add(req.req_id)
-        for d in view.orphaned:
-            if any(p.startswith(repo_rel + "::") for p in d.baseline_hashes):
-                fallback_decisions.append(d)
+
+    # Orphaned decisions about this file are shown even when a requirement
+    # matches: a legacy ratification whose sketch is still extracted must
+    # not disappear behind that sketch.
+    for d in view.orphaned:
+        if any(p.startswith(repo_rel + "::") for p in d.baseline_hashes):
+            fallback_decisions.append(d)
 
     if not found and not fallback_decisions:
         print("no intent covers this code")

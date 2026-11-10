@@ -192,7 +192,7 @@ def test_ratify_decision_survives_restart(tmp_path: Path) -> None:
     symbols = build_symbol_table(repo)
     fresh = FakeExtractor().extract(store.all_observations, symbols=symbols)
     assert fresh.requirements[0].maturity == "sketch"
-    view = apply_decisions(fresh.requirements, store.all_decisions)
+    view = apply_decisions(fresh.requirements, store.all_decisions, symbols)
     assert view.requirements[0].maturity == "active"
     assert view.orphaned == []
 
@@ -726,10 +726,9 @@ def test_active_unimplemented_is_surfaced_in_settle(tmp_path: Path) -> None:
 
     store = MemoryStore(tmp_path)
     view = apply_decisions(
-        FakeExtractor()
-        .extract(store.all_observations, symbols=build_symbol_table(tmp_path))
-        .requirements,
+        FakeExtractor().extract(store.all_observations, symbols=symbols).requirements,
         store.all_decisions,
+        symbols,
     )
     assert view.requirements[0].maturity == "active"
     assert judge_requirement(view.requirements[0], symbols).status == "unimplemented"

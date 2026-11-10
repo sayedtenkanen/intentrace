@@ -4,10 +4,12 @@
 > in either order. **intentrace keeps them reconciled, in both directions**, and reports the
 > state of that reconciliation without ever overclaiming.
 
-**Status: slices 1–2 implemented.** `intentrace why` reports intent covering code,
-`intentrace ratify` / `intentrace settle` record human ratifications with code
-baselines, and `why` reports drift for ratified requirements. No model, no gate yet.
-The artifact behind the implementation is [`docs/SPEC.md`](docs/SPEC.md).
+**Status: slices 1–4 implemented.** `intentrace why` reports intent covering code,
+`intentrace ratify` takes responsibility for one requirement with a code baseline,
+`intentrace attest` records the exit for a late anchor, drift, rename or move, and
+`intentrace settle` walks open verdicts before proposing sketches. `why` reports drift
+against the ratified baseline. No model and no gate yet. The artifact behind the
+implementation is [`docs/SPEC.md`](docs/SPEC.md).
 
 ---
 
@@ -63,8 +65,9 @@ diff looks fine is not the same as taking responsibility for a behaviour — and
 someone has, the dash is the honest answer. And `evidence: none` is printed rather than
 omitted: a requirement nothing verifies is a fact you should see, not a silence.
 
-Later slices add the states this cannot yet reach — `active` and a real `ratified` date
-arrive with the settle loop, `co-derived` origin with reverse extraction.
+Once ratified, the requirement is `active`: the words are stored in the decision log, so a
+later extractor version cannot hide them, and `why` compares current code against the
+recorded baseline.
 
 ## What it does not do
 
@@ -98,27 +101,46 @@ of the current spec lists what changed between them and which finding forced eac
 
 ## Status and how to run it
 
-Slice 1 (`why` end to end against a deterministic fake extractor) and slice 2 (the
-settle loop: ratification with code baselines, drift verdicts) are implemented and
-have been through review. Python anchoring only, no model and no gate. Against the
-bundled fixture:
+Slice 1 (`why` end to end against a deterministic fake extractor), slice 2 (the
+settle loop: ratification with code baselines, drift verdicts), slice 3a (the
+decision log and extraction fixes), and slice 4 (durable ratification and an exit
+for every open verdict) are implemented and have been through review. Python
+anchoring only, no model and no gate. Against the bundled fixture:
 
 ```
 uv sync --extra dev
 uv run intentrace ingest tests/fixtures/sample_project/observations.jsonl
 uv run intentrace why tests/fixtures/sample_project/retry.py:11
-uv run intentrace settle            # ratify or skip sketches one at a time
-uv run intentrace ratify R-414282bb # ratify one requirement (unique prefix works)
+uv run intentrace settle             # attest open verdicts, then ratify or skip sketches
+uv run intentrace ratify R-414282bb  # ratify one requirement (unique prefix works)
+uv run intentrace attest R-414282bb  # record a late anchor, drift, rename or move
 uv run intentrace why tests/fixtures/sample_project/retry.py:11   # now active
 ```
+
+`settle` is a checkpoint, not a bulk action. It first lists every active requirement
+whose verdict is `unconfirmed` or `orphaned` and offers one attestation each; the tool
+assigns the reason (`late-anchor`, `rename`, `move`, or `drift-accepted`) from what it
+observes, so a rename cannot be used to accept a changed body. Accepting drift requires
+a `--rationale`. `--anchor` repeats once per missing anchor, and a scan that cannot read
+a file fails closed instead of treating its anchors as deleted. Only after open verdicts
+does `settle` present unratified sketches, one at a time.
 
 **What it can and cannot do yet.** Drift across time now works for ratified
 requirements: ratification records each anchor's `node_hash`, and `why` compares
 current code against that baseline — a changed body reports `unconfirmed` naming
 both hashes, a vanished symbol reports `orphaned`, anything else stays
-`unverified`. What is still missing: no evidence and therefore no `satisfied` or
-`locked` states, no CI gate, no cross-cutting requirements (scope predicates),
-Python only, and migration is specified but not executed.
+`unverified`. A recorded attestation replaces the whole baseline and is shown with
+its date, actor and reason. What is still missing: no evidence and therefore no
+`satisfied` or `locked` states, no CI gate, no cross-cutting requirements (scope
+predicates), Python only, and migration is specified but not executed.
+
+**Upgrade and downgrade.** Decisions written by this version are forward-compatible:
+an older log without snapshots is read and its ratifications are reported as orphaned
+with the reason, and unknown decision kinds (including `attest`) are read as written by
+a newer version rather than as corruption. The reverse is not supported: an older build
+predating slice 4 validates decision kinds against a closed set and will treat an
+`attest` record as corrupt. Downgrading after `attest` has been used therefore requires
+removing those records from the log by hand.
 
 Divergences from the slice brief are recorded in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md),
 and per-slice status in [`docs/PROGRESS.md`](docs/PROGRESS.md).

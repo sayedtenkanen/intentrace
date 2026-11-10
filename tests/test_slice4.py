@@ -35,6 +35,16 @@ CODE_TWO = '"""Two."""\n\n\ndef alpha():\n    return 1\n\n\ndef beta():\n    ret
 
 CODE_TWO_RENAMED = '"""Two."""\n\n\ndef gamma():\n    return 1\n\n\ndef delta():\n    return 2\n'
 
+CODE_FROB_RENAMED_CHANGED = '"""Service."""\n\n\ndef fuzz():\n    return 2\n'
+
+CODE_DUPLICATE_BODIES = (
+    '"""Two."""\n\n\ndef alpha():\n    return 1\n\n\ndef beta():\n    return 1\n'
+)
+
+CODE_DUPLICATE_BODIES_RENAMED = (
+    '"""Two."""\n\n\ndef gamma():\n    return 1\n\n\ndef delta():\n    return 1\n'
+)
+
 
 def make_repo(tmp_path: Path, code: str, text: str) -> Path:
     from intentrace.log import append_observation
@@ -139,6 +149,12 @@ def test_late_anchor_attest_then_drift_requires_rationale(tmp_path: Path) -> Non
     assert "unconfirmed" in drifted.stdout
     baseline = attest_decision.baseline_hashes["app.py::frobnicate"]
     assert baseline[:8] in drifted.stdout
+    # Both hashes are reported: the baseline alone would not show what the
+    # code is now.
+    from intentrace.symbol import build_symbol_table
+
+    current = build_symbol_table(repo).by_qualified["app.py::frobnicate"].node_hash
+    assert current[:8] in drifted.stdout
 
     # Acknowledging drift without a reason is refused.
     refused = run_cli(repo, "attest", req_id)
@@ -498,3 +514,225 @@ def test_no_bulk_attest_flag() -> None:
     result = run_cli(Path.cwd(), "attest", "--help", input_text="")
     assert result.returncode == 0
     assert "--all" not in result.stdout
+
+
+# Review pass 2 — findings the slice-4 review raised.
+
+
+def test_manual_replacement_with_a_changed_body_needs_a_rationale(tmp_path: Path) -> None:
+    """A renamed-and-modified --anchor is drift, not a clean rename."""
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    req_id = derive(repo)[0].req_id
+    assert run_cli(repo, "ratify", req_id).returncode == 0
+    (repo / "app.py").write_text(CODE_FROB_RENAMED_CHANGED)
+
+    refused = run_cli(repo, "attest", req_id, "--anchor", "app.py::fuzz")
+    assert refused.returncode != 0
+    assert "rationale" in (refused.stdout + refused.stderr).lower()
+    assert len(decisions(repo)) == 1
+
+    accepted = run_cli(
+        repo,
+        "attest",
+        req_id,
+        "--anchor",
+        "app.py::fuzz",
+        "--rationale",
+        "renamed and the retry count changed",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    final = decisions(repo)[-1]
+    assert final.reason == "drift-accepted"
+    assert set(final.baseline_hashes) == {"app.py::fuzz"}
+
+
+def test_duplicate_name_hashes_do_not_block_replacement_mapping(tmp_path: Path) -> None:
+    """One --anchor per missing anchor is enough even with equal hashes."""
+    from intentrace.log import append_decision
+    from intentrace.models import Decision, Observation, RequirementSnapshot, Span
+    from intentrace.symbol import build_symbol_table
+
+    repo = make_repo(tmp_path, CODE_DUPLICATE_BODIES, FROB)
+    symbols = build_symbol_table(repo)
+    alpha = symbols.by_qualified["app.py::alpha"]
+    beta = symbols.by_qualified["app.py::beta"]
+    assert alpha.name_hash == beta.name_hash
+    obs_id = Observation.create(session_id="s1", turn_index=0, kind="prompt", text=FROB).obs_id
+    req_id = "e" * 64
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={
+                alpha.symbol_path: alpha.node_hash,
+                beta.symbol_path: beta.node_hash,
+            },
+            baseline_name_hashes={
+                alpha.symbol_path: alpha.name_hash,
+                beta.symbol_path: beta.name_hash,
+            },
+            snapshot=RequirementSnapshot(
+                statement=FROB,
+                provenance=[Span(obs_id=obs_id, start=0, end=len(FROB))],
+                extractor_version="fake-v2",
+            ),
+        ),
+    )
+    (repo / "app.py").write_text(CODE_DUPLICATE_BODIES_RENAMED)
+
+    attested = run_cli(
+        repo,
+        "attest",
+        req_id,
+        "--anchor",
+        "app.py::gamma",
+        "--anchor",
+        "app.py::delta",
+    )
+    assert attested.returncode == 0, attested.stderr
+    final = decisions(repo)[-1]
+    assert final.reason == "rename"
+    assert set(final.baseline_hashes) == {"app.py::gamma", "app.py::delta"}
+
+
+def test_same_statement_is_ratified_once_within_one_settle_run(tmp_path: Path) -> None:
+    """Two observations with the same words do not create two obligations."""
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    add_observation(repo, FROB, turn=1)
+
+    settled = run_cli(repo, "settle", "--actor", "tester", input_text="y\n")
+    assert settled.returncode == 0, settled.stderr
+    assert "already covered" in settled.stdout
+    assert len(decisions(repo)) == 1
+
+
+def test_attest_refuses_a_plan_that_went_stale_while_prompting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Code changed after the plan was shown must be re-planned, not recorded."""
+    import intentrace.cli as cli
+
+    repo = make_repo(tmp_path, CODE_EMPTY, FROB)
+    req_id = derive(repo)[0].req_id
+    assert run_cli(repo, "ratify", req_id).returncode == 0
+    (repo / "app.py").write_text(CODE_FROB)
+
+    def answer_and_change(_prompt: str) -> str:
+        (repo / "app.py").write_text(CODE_FROB_CHANGED)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", answer_and_change)
+    monkeypatch.chdir(repo)
+    rc = cli.cmd_attest(
+        argparse.Namespace(req_id=req_id, anchor=None, rationale=None, actor="tester")
+    )
+    assert rc == 1
+    out, err = capsys.readouterr()
+    assert "changed while deciding" in (out + err)
+    assert len(decisions(repo)) == 1
+
+
+def test_scan_error_blocks_attestation(tmp_path: Path) -> None:
+    """An unreadable file must not turn its anchors into accepted drops."""
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    req_id = derive(repo)[0].req_id
+    assert run_cli(repo, "ratify", req_id).returncode == 0
+    (repo / "broken.py").mkdir()
+
+    refused = run_cli(repo, "attest", req_id, "--rationale", "anything")
+    assert refused.returncode != 0
+    assert "broken.py" in (refused.stdout + refused.stderr)
+    assert len(decisions(repo)) == 1
+
+
+def test_legacy_orphan_is_shown_by_why_alongside_its_sketch(tmp_path: Path) -> None:
+    """A matching sketch must not hide a pre-snapshot ratification."""
+    from intentrace.log import append_decision
+    from intentrace.models import Decision
+
+    repo = make_repo(tmp_path, CODE_FROB, FROB)
+    req_id = derive(repo)[0].req_id
+    append_decision(
+        repo,
+        Decision.create(
+            kind="ratify",
+            req_id=req_id,
+            actor="tester",
+            baseline_hashes={"app.py::frobnicate": "0" * 64},
+        ),
+    )
+
+    out = why(repo)
+    assert "sketch" in out.stdout
+    assert "orphaned decision" in out.stdout
+    assert "snapshot" in out.stdout.lower()
+
+
+def test_latest_snapshot_ratification_wins() -> None:
+    """Replay uses the most recent ratify, so a newer baseline is not lost."""
+    from intentrace.decisions import apply_decisions
+    from intentrace.models import Decision, RequirementSnapshot, Span
+    from intentrace.symbol import SymbolTable
+
+    def ratify(actor: str, baseline: dict[str, str]) -> Decision:
+        return Decision.create(
+            kind="ratify",
+            req_id="f" * 64,
+            actor=actor,
+            baseline_hashes=baseline,
+            snapshot=RequirementSnapshot(
+                statement="The frobnicate function must retry twice.",
+                provenance=[Span(obs_id="o", start=0, end=1)],
+                extractor_version="v",
+            ),
+        )
+
+    older = ratify("first", {"app.py::frobnicate": "1" * 64})
+    stale_attest = Decision.create(
+        kind="attest",
+        req_id="f" * 64,
+        actor="first",
+        reason="late-anchor",
+        baseline_hashes={"app.py::frobnicate": "3" * 64},
+    )
+    newer = ratify("second", {"app.py::frobnicate": "2" * 64})
+    loaded = apply_decisions([], [older, stale_attest, newer], SymbolTable())
+
+    assert loaded.requirements[0].ratification is not None
+    assert loaded.requirements[0].ratification.actor == "second"
+    assert loaded.requirements[0].ratification.baseline_hashes == {"app.py::frobnicate": "2" * 64}
+    assert loaded.requirements[0].ratification.attested_at is None
+
+
+def test_invalid_attestation_decisions_are_rejected() -> None:
+    """A record that would replace a baseline must carry a valid reason."""
+    from intentrace.models import Decision
+
+    with pytest.raises(ValueError):
+        Decision.create(kind="attest", req_id="a" * 64, actor="tester", reason="clean")
+    with pytest.raises(ValueError):
+        Decision.create(
+            kind="attest",
+            req_id="a" * 64,
+            actor="tester",
+            reason="drift-accepted",
+        )
+    with pytest.raises(ValueError):
+        Decision.create(
+            kind="attest",
+            req_id="a" * 64,
+            actor="tester",
+            reason="drift-accepted",
+            rationale="   ",
+        )
+
+    valid = Decision.create(
+        kind="attest",
+        req_id="a" * 64,
+        actor="tester",
+        reason="drift-accepted",
+        rationale="retries changed",
+    )
+    assert valid.reason == "drift-accepted"

@@ -29,8 +29,10 @@ file is the public record of what each slice actually delivered.
   so one attestation cannot silently drop another anchor. `why` shows the attestation
   date, actor and reason.
 - **Rename proposals.** Anchors record a name-insensitive hash; `settle` proposes the
-  renamed symbol when exactly one same-file symbol matches. The hash erases the definition
-  name in the `def` line, recursive calls, `self.method` references and decorators.
+  renamed symbol when exactly one same-file symbol matches. The hash includes decorators
+  and erases only the definition name and genuine self-references (recursive calls,
+  `self`/`cls` attributes, decorator self-references), so an unrelated identifier or a
+  changed decorator cannot pass as a rename.
 - **Every open verdict has an exit.** `settle` presents `unconfirmed` and `orphaned`
   requirements as attest items, one at a time, before sketches. No batch attest.
 - **Unknown decision kinds** are read as written by a newer version, not corruption.
@@ -41,8 +43,18 @@ file is the public record of what each slice actually delivered.
   `drift-accepted` drop rather than a dead end, and can be re-attached later as a late
   anchor. `RequirementSnapshot` enforces the provenance invariant so a malformed record
   cannot crash the view.
-- 99 tests (13 in `tests/test_slice4.py`, including the three exit tests and the review
-  findings); ruff, ruff format and `mypy --strict` clean.
+- **Second review remediation (15 comments).** Log appends take a cross-process lock,
+  repair a torn tail before writing, and reject stale plans: attestation re-reads,
+  rescans and re-plans under the lock, and ratification re-checks under it. Attestation
+  records must carry a known reason and a rationale when drift is accepted. Replacement
+  mapping accepts one `--anchor` per missing anchor even when name hashes collide, and a
+  changed body behind a manual replacement is drift. A symbol scan that cannot read a
+  file fails closed instead of treating anchors as deleted. `apply_decisions` requires
+  the symbol table and uses the most recent ratification. Same-statement sketches are
+  ratified once per settle run. `why` shows a legacy orphan alongside its sketch, and
+  the README documents `attest`, the settle flow, and the downgrade limit.
+- 115 tests (21 in `tests/test_slice4.py`, including the three exit tests and both review
+  passes); ruff, ruff format and `mypy --strict` clean.
 
 **Intentional behaviour changes**
 
@@ -67,6 +79,10 @@ file is the public record of what each slice actually delivered.
 - An acknowledged deletion shows in `settle` as an unimplemented obligation, not in
   `why`: no code location remains to ask about. Re-attaching code with `attest --anchor`
   makes it visible again.
+- Downgrading after `attest` has been used is unsupported: builds before slice 4 treat an
+  `attest` record as corruption. Forward compatibility (new builds reading old logs) is
+  implemented; rollback compatibility cannot be added to already-released binaries, so
+  the limit is documented in the README.
 
 ---
 

@@ -9,7 +9,9 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+ATTEST_REASONS = frozenset({"late-anchor", "rename", "move", "drift-accepted"})
 
 
 def content_hash(*parts: str) -> str:
@@ -260,6 +262,26 @@ class Decision(BaseModel):
         if not v.strip():
             raise ValueError("kind must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def attest_fields_are_valid(self) -> Decision:
+        """An attestation must carry a reason the tool can assign.
+
+        Replay treats an attestation as a full baseline replacement, so an
+        unrecognised reason or a drift acceptance with no rationale would
+        let a bad record make drift look acknowledged. Reject it at the
+        boundary, which also makes a malformed log line corruption rather
+        than a silent replacement.
+        """
+        if self.kind != "attest":
+            return self
+        if self.reason not in ATTEST_REASONS:
+            raise ValueError(
+                f"attest reason must be one of {sorted(ATTEST_REASONS)}, got {self.reason!r}"
+            )
+        if self.reason == "drift-accepted" and not (self.rationale and self.rationale.strip()):
+            raise ValueError("drift-accepted requires a non-empty rationale")
+        return self
 
     @classmethod
     def create(
