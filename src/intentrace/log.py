@@ -325,9 +325,12 @@ def _fold_companion_log(repo_root: Path) -> None:
             return
 
         _check_fold_order(base_entries, companion_entries)
-        if companion_entries:
-            payload = "".join(entry.model_dump_json() + "\n" for entry in companion_entries)
-            _append_line(repo_root, payload, _log_path(repo_root))
+        # Append the companion's complete lines byte for byte. Re-serializing
+        # would be a rewrite of records the fold promises to keep unchanged.
+        companion_lines = _iter_lines(companion)
+        complete_lines = companion_lines[:-1] if torn_error is not None else companion_lines
+        if complete_lines:
+            _append_line(repo_root, "".join(complete_lines), _log_path(repo_root))
 
         if torn_error is not None:
             print(

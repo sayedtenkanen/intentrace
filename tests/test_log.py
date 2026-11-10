@@ -252,8 +252,10 @@ def test_companion_log_is_folded_once_and_kept(
         ],
     )
     original = _companion_log_path(repo_root).read_bytes()
+    base_before = _log_path(repo_root).read_bytes()
 
     result = read_observations(repo_root)
+    assert _log_path(repo_root).read_bytes() == base_before + original
     assert [d.kind for d in result.decisions] == ["ratify", "attest", "attest"]
     assert [d.reason for d in result.decisions] == [None, "late-anchor", "drift-accepted"]
 
