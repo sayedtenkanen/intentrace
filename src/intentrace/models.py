@@ -9,7 +9,9 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+ATTEST_REASONS = frozenset({"late-anchor", "rename", "move", "drift-accepted"})
 
 
 def content_hash(*parts: str) -> str:
@@ -85,6 +87,7 @@ class AnchorRef(BaseModel):
     symbol_path: str  # e.g. "retry.py::RetryPolicy::attempt"
     node_kind: str  # tree-sitter node type
     node_hash: str  # hash of the NORMALIZED subtree
+    name_hash: str = ""  # normalized subtree with its own name erased (rename matching)
 
 
 class EvidenceRef(BaseModel):
@@ -131,18 +134,46 @@ class Observation(BaseModel):
         )
 
 
+class RequirementSnapshot(BaseModel):
+    """What a ratify decision recorded, independent of any later extraction.
+
+    This is primary storage for a ratified requirement: the statement,
+    the provenance spans that justify it, and the extractor version that
+    produced it. Fresh extraction can never hide it.
+    """
+
+    statement: str
+    provenance: list[Span]
+    extractor_version: str
+
+    @field_validator("provenance")
+    @classmethod
+    def provenance_non_empty(cls, v: list[Span]) -> list[Span]:
+        """I9 holds for the snapshot too: a ratification always cites a span."""
+        if not v:
+            raise ValueError("provenance must be non-empty (I9)")
+        return v
+
+
 class Ratification(BaseModel):
     """The recorded consequence of a human taking responsibility.
 
     Attached to a requirement at view-build time from the decision log;
     never stored on the requirement itself. baseline_hashes maps each
     ratified symbol_path to the node_hash as it was at ratification (I3).
+    baseline_name_hashes carries the rename-insensitive hash for the same
+    paths, so a later rename can be proposed without re-deriving the old
+    body.
     """
 
     actor: str
     timestamp: datetime
     settle_id: str = ""
     baseline_hashes: dict[str, str] = {}
+    baseline_name_hashes: dict[str, str] = {}
+    attested_at: datetime | None = None
+    attest_actor: str | None = None
+    attest_reason: str | None = None
 
 
 class Requirement(BaseModel):
@@ -204,30 +235,66 @@ class Requirement(BaseModel):
 class Decision(BaseModel):
     """An immutable recorded human act, appended to the same JSONL log.
 
-    Only kind "ratify" is produced in slice 2; the kind union admits the
-    other SPEC §6.1 kinds without a schema change. baseline_hashes carries
-    the ratified baseline (symbol_path -> node_hash); it is empty for kinds
-    that have no baseline.
+    kind is a plain string so that a log written by a newer version is read,
+    not treated as corruption. Known kinds are ratify, waive, demote,
+    archive, migrate and attest; unknown ones are inert and reported.
+
+    A ratify decision carries the RequirementSnapshot it made primary. An
+    attest decision carries the full replacement baseline and the reason the
+    tool observed (late-anchor, rename, move, drift-accepted).
     """
 
     dec_id: str
-    kind: Literal["ratify", "waive", "demote", "archive", "migrate"]
+    kind: str
     req_id: str
     actor: str
     timestamp: datetime
     settle_id: str = ""
     rationale: str | None = None
     baseline_hashes: dict[str, str] = {}
+    baseline_name_hashes: dict[str, str] = {}
+    reason: str | None = None
+    snapshot: RequirementSnapshot | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def kind_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("kind must be non-empty")
+        return v
+
+    @model_validator(mode="after")
+    def attest_fields_are_valid(self) -> Decision:
+        """An attestation must carry a reason the tool can assign.
+
+        Replay treats an attestation as a full baseline replacement, so an
+        unrecognised reason or a drift acceptance with no rationale would
+        let a bad record make drift look acknowledged. Reject it at the
+        boundary, which also makes a malformed log line corruption rather
+        than a silent replacement.
+        """
+        if self.kind != "attest":
+            return self
+        if self.reason not in ATTEST_REASONS:
+            raise ValueError(
+                f"attest reason must be one of {sorted(ATTEST_REASONS)}, got {self.reason!r}"
+            )
+        if self.reason == "drift-accepted" and not (self.rationale and self.rationale.strip()):
+            raise ValueError("drift-accepted requires a non-empty rationale")
+        return self
 
     @classmethod
     def create(
         cls,
-        kind: Literal["ratify", "waive", "demote", "archive", "migrate"],
+        kind: str,
         req_id: str,
         actor: str,
         settle_id: str = "",
         rationale: str | None = None,
         baseline_hashes: dict[str, str] | None = None,
+        baseline_name_hashes: dict[str, str] | None = None,
+        reason: str | None = None,
+        snapshot: RequirementSnapshot | None = None,
         timestamp: datetime | None = None,
     ) -> Decision:
         """Create a decision with a content-addressed id.
@@ -237,8 +304,24 @@ class Decision(BaseModel):
         """
         ts = timestamp or datetime.now(UTC)
         baselines = dict(baseline_hashes) if baseline_hashes else {}
+        name_baselines = dict(baseline_name_hashes) if baseline_name_hashes else {}
         baseline_part = canonical_json(*[f"{k}={v}" for k, v in sorted(baselines.items())])
-        raw = canonical_json(kind, req_id, actor, settle_id, rationale or "", baseline_part)
+        name_part = canonical_json(*[f"{k}={v}" for k, v in sorted(name_baselines.items())])
+        snapshot_part = ""
+        if snapshot is not None:
+            prov = [f"{p.obs_id}:{p.start}:{p.end}" for p in snapshot.provenance]
+            snapshot_part = canonical_json(snapshot.statement, *prov, snapshot.extractor_version)
+        raw = canonical_json(
+            kind,
+            req_id,
+            actor,
+            settle_id,
+            rationale or "",
+            reason or "",
+            baseline_part,
+            name_part,
+            snapshot_part,
+        )
         dec_id = content_hash(raw)
         return cls(
             dec_id=dec_id,
@@ -249,4 +332,7 @@ class Decision(BaseModel):
             settle_id=settle_id,
             rationale=rationale,
             baseline_hashes=baselines,
+            baseline_name_hashes=name_baselines,
+            reason=reason,
+            snapshot=snapshot,
         )

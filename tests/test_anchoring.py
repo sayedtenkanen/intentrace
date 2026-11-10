@@ -207,3 +207,58 @@ def test_symbol_path_includes_directory() -> None:
     assert anchor_a.symbol_path != anchor_b.symbol_path
     assert anchor_a.symbol_path == "src/pkg/retry.py::foo"
     assert anchor_b.symbol_path == "tests/fixtures/retry.py::foo"
+
+
+def _anchor(source: bytes, name: str):
+    tree = parse_source(source)
+    return build_anchor("app.py", tree, source, name)
+
+
+def test_name_hash_matches_a_recursive_rename() -> None:
+    """A pure rename, including recursive calls, compares equal."""
+    before = _anchor(b"def countdown(n):\n    if n:\n        countdown(n - 1)\n", "countdown")
+    after = _anchor(b"def count_up(n):\n    if n:\n        count_up(n - 1)\n", "count_up")
+    assert before is not None and after is not None
+    assert before.name_hash == after.name_hash
+
+
+def test_name_hash_matches_a_decorated_rename() -> None:
+    """Decorators are part of the hash but do not block a pure rename."""
+    before = _anchor(b"@cache\ndef alpha(x):\n    return x\n", "alpha")
+    after = _anchor(b"@cache\ndef gamma(x):\n    return x\n", "gamma")
+    assert before is not None and after is not None
+    assert before.name_hash == after.name_hash
+
+
+def test_name_hash_changes_when_a_decorator_changes() -> None:
+    """Two symbols with different decorators must not look like a rename."""
+    before = _anchor(b"@cache\ndef alpha(x):\n    return x\n", "alpha")
+    after = _anchor(b"@lru_cache\ndef gamma(x):\n    return x\n", "gamma")
+    assert before is not None and after is not None
+    assert before.name_hash != after.name_hash
+    assert before.node_hash != after.node_hash
+
+
+def test_name_hash_preserves_unrelated_same_named_identifiers() -> None:
+    """A changed parameter that shares the definition name is not erased.
+
+    The old normalizer erased every identifier with the definition's
+    spelling, so changing a shadowing parameter could pass as a clean
+    rename and skip the drift rationale.
+    """
+    before = _anchor(b"def alpha(alpha=1):\n    return alpha\n", "alpha")
+    after = _anchor(b"def gamma(gamma=2):\n    return gamma\n", "gamma")
+    assert before is not None and after is not None
+    assert before.name_hash != after.name_hash
+
+
+def test_scan_error_is_recorded_not_silently_skipped(tmp_path) -> None:
+    """An unreadable file is visible, so it cannot look like deleted code."""
+    from intentrace.symbol import build_symbol_table
+
+    (tmp_path / "app.py").write_text("def kept():\n    return 1\n")
+    (tmp_path / "broken.py").mkdir()
+
+    table = build_symbol_table(tmp_path)
+    assert "app.py::kept" in table.by_qualified
+    assert "broken.py" in table.scan_errors

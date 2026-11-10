@@ -6,6 +6,89 @@ file is the public record of what each slice actually delivered.
 
 ---
 
+## Slice 4 — durable ratification, and an exit for every open verdict
+
+**Status:** complete; review remediated.
+
+**Delivered**
+
+- **Ratification is primary.** A `ratify` decision carries a `RequirementSnapshot`
+  (statement, provenance spans, extractor version). `apply_decisions` builds active
+  requirements from snapshots, not from fresh extraction, so a version bump can no longer
+  hide the ratified text. Decisions written before this slice have no snapshot; they are
+  reported orphaned with the reason, never promoted.
+- **Suppression.** A sketch is not proposed when a snapshot covers the same span in the
+  same observation or the same normalised statement in any observation. Counts and reasons
+  are shown in `settle`. A sketch proposing an anchor the snapshot lacks is attached as a
+  late anchor; a partial span overlap is shown as a possible successor and stays in the
+  queue.
+- **Attest.** `intentrace attest <req_id>` records one act that sets the full baseline.
+  The tool assigns the reason: `drift-accepted` (a rationale is required; also when a
+  vanished anchor has no replacement and is dropped), `rename` or `move` when a missing
+  anchor is replaced, otherwise `late-anchor`. `--anchor` repeats once per missing anchor,
+  so one attestation cannot silently drop another anchor. `why` shows the attestation
+  date, actor and reason.
+- **Rename proposals.** Anchors record a name-insensitive hash; `settle` proposes the
+  renamed symbol when exactly one same-file symbol matches. The hash includes decorators
+  and erases only the definition name and genuine self-references (recursive calls,
+  `self`/`cls` attributes, decorator self-references), so an unrelated identifier or a
+  changed decorator cannot pass as a rename.
+- **Every open verdict has an exit.** `settle` presents `unconfirmed` and `orphaned`
+  requirements as attest items, one at a time, before sketches. No batch attest.
+- **Unknown decision kinds** are read as written by a newer version, not corruption.
+- **Review remediation.** A legacy ratify with no snapshot no longer blocks re-ratifying
+  its sketch; `--anchor` covers every missing anchor; `settle` no longer lists an
+  orphaned requirement as also unimplemented; an attestation with an empty baseline is
+  replayed instead of ignored; a deleted anchor with no replacement is an acknowledged
+  `drift-accepted` drop rather than a dead end, and can be re-attached later as a late
+  anchor. `RequirementSnapshot` enforces the provenance invariant so a malformed record
+  cannot crash the view.
+- **Second review remediation (15 comments).** Log appends take a cross-process lock,
+  repair a torn tail before writing, and reject stale plans: attestation re-reads,
+  rescans and re-plans under the lock, and ratification re-checks under it. Attestation
+  records must carry a known reason and a rationale when drift is accepted. Replacement
+  mapping accepts one `--anchor` per missing anchor even when name hashes collide, and a
+  changed body behind a manual replacement is drift. A symbol scan that cannot read a
+  file fails closed instead of treating anchors as deleted. `apply_decisions` requires
+  the symbol table and uses the most recent ratification. Same-statement sketches are
+  ratified once per settle run. `why` shows a legacy orphan alongside its sketch, and
+  the README documents `attest`, the settle flow, and the versioned log that
+  makes rollback readable.
+- 119 tests (21 in `tests/test_slice4.py`, including the three exit tests and both review
+  passes); ruff, ruff format and `mypy --strict` clean.
+
+**Intentional behaviour changes**
+
+- A version bump no longer orphans a ratification written by this slice. The old
+  `test_version_bump_orphans_old_ratifications` is replaced by
+  `test_preslice4_ratification_is_reported_not_promoted`; the new behaviour is exit test 2
+  in `test_slice4.py`.
+- A ratified qualified anchor is pinned. Bare-name ambiguity introduced elsewhere no
+  longer turns a clean requirement `unconfirmed`; it cannot change what was ratified.
+  `test_why_shows_detached_anchor` became
+  `test_ratified_anchor_survives_extractor_ambiguity`.
+
+**Still incomplete (by design)**
+
+- Migration proposals for a changed extractor version (spec §14 criterion 4) are not
+  emitted; v0.1 keeps the ratified identity and suppresses the re-derived sketch.
+- Ratified requirements are still local (`.intentrace/log.jsonl`), not a tracked ledger.
+- No evidence links, so `satisfied` and `locked` remain unprintable.
+- A pre-slice-4 ratification under a different extractor version cannot be promoted: no
+  statement was stored, so there is nothing to make primary. It is reported with the
+  reason.
+- An acknowledged deletion shows in `settle` as an unimplemented obligation, not in
+  `why`: no code location remains to ask about. Re-attaching code with `attest --anchor`
+  makes it visible again.
+- Rollback is supported by a versioned companion log: `.intentrace/log.jsonl` keeps
+  observations and decision kinds a pre-slice-4 build can parse, while `attest` and any
+  future unknown kind go to `.intentrace/decisions-v2.jsonl`. Readers merge both by
+  timestamp. An older build ignores the companion file, so it never marks the log
+  corrupt; the residual limitation is that it cannot see acknowledged attestations and
+  may report that drift as `unconfirmed`.
+
+---
+
 ## FakeExtractor fake-v2 — splitter rework (migration event)
 
 **Status:** complete.

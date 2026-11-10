@@ -38,8 +38,72 @@ def symbol_path(file_path: str, node: tree_sitter.Node, source: bytes) -> str:
     return file_path + "::" + "::".join(parts) if parts else file_path
 
 
-def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
-    """Normalize a subtree for hashing: exclude comments, docstrings, and whitespace.
+def _definition_root(node: tree_sitter.Node) -> tree_sitter.Node:
+    """Return the decorated definition when a definition carries decorators.
+
+    The definition node is the child of a ``decorated_definition``; hashing
+    only that child would omit sibling decorators, so two symbols with
+    different decorators could compare equal.
+    """
+    parent = node.parent
+    if parent is not None and parent.type == "decorated_definition":
+        return parent
+    return node
+
+
+def _self_reference_ranges(
+    root: tree_sitter.Node,
+    definition: tree_sitter.Node,
+    source: bytes,
+    name: str,
+) -> set[tuple[int, int]]:
+    """Byte ranges to erase for rename matching.
+
+    Only the definition's own name and genuine self-references are erased:
+    recursive calls (``name(...)``), ``self.name``/``cls.name``, and
+    identifiers inside decorators. An unrelated local, parameter or
+    reference that happens to share the name keeps its text, so changing it
+    changes the hash.
+    """
+
+    def text(node: tree_sitter.Node) -> str:
+        return source[node.start_byte : node.end_byte].decode()
+
+    ranges: set[tuple[int, int]] = set()
+    name_node = definition.child_by_field_name("name")
+    if name_node is not None:
+        ranges.add((name_node.start_byte, name_node.end_byte))
+
+    def walk(node: tree_sitter.Node, in_decorator: bool = False) -> None:
+        decorator = in_decorator or node.type == "decorator"
+        if node.type == "call":
+            function = node.child_by_field_name("function")
+            if function is not None and function.type == "identifier" and text(function) == name:
+                ranges.add((function.start_byte, function.end_byte))
+        if node.type == "attribute":
+            attribute = node.child_by_field_name("attribute")
+            obj = node.child_by_field_name("object")
+            if (
+                attribute is not None
+                and text(attribute) == name
+                and (decorator or (obj is not None and text(obj) in ("self", "cls")))
+            ):
+                ranges.add((attribute.start_byte, attribute.end_byte))
+        if decorator and node.type == "identifier" and text(node) == name:
+            ranges.add((node.start_byte, node.end_byte))
+        for child in node.children:
+            walk(child, decorator)
+
+    walk(root)
+    return ranges
+
+
+def _normalize_subtree(
+    node: tree_sitter.Node,
+    source: bytes,
+    erase: set[tuple[int, int]] | None = None,
+) -> str:
+    """Normalize a subtree for hashing: exclude comments, docstrings, whitespace.
 
     Excludes:
     - comment nodes
@@ -47,7 +111,13 @@ def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
       of a function/class/module body)
 
     Preserves all other string literals (they are behaviour).
+
+    ``erase`` names the byte ranges to replace with a placeholder. Only the
+    definition name and genuine self-references are erased (see
+    ``_self_reference_ranges``); unrelated identifiers keep their text.
     """
+    erased = erase or set()
+
     if node.type == "comment":
         return ""
 
@@ -59,11 +129,12 @@ def _normalize_subtree(node: tree_sitter.Node, source: bytes) -> str:
     parts: list[str] = []
 
     if node.child_count == 0:
-        # Leaf node — include token text
+        if (node.start_byte, node.end_byte) in erased:
+            return "<name>"
         return source[node.start_byte : node.end_byte].decode()
 
     for child in node.children:
-        normalized = _normalize_subtree(child, source)
+        normalized = _normalize_subtree(child, source, erased)
         if normalized:
             parts.append(normalized)
 
@@ -112,8 +183,26 @@ def _is_leading_docstring(node: tree_sitter.Node, source: bytes) -> bool:
 
 
 def node_hash(node: tree_sitter.Node, source: bytes) -> str:
-    """Compute a hash of the normalized subtree."""
-    normalized = _normalize_subtree(node, source)
+    """Compute a hash of the normalized subtree, including decorators."""
+    normalized = _normalize_subtree(_definition_root(node), source)
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def node_name_hash(node: tree_sitter.Node, source: bytes) -> str:
+    """Hash a subtree with only its own name and self-references erased.
+
+    Used only to propose a renamed symbol: two definitions whose bodies are
+    identical apart from their name (including recursive references) match.
+    Decorators are included, and unrelated identifiers that happen to share
+    the name are preserved, so a real body change cannot pass as a rename.
+    """
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return node_hash(node, source)
+    name = source[name_node.start_byte : name_node.end_byte].decode()
+    root = _definition_root(node)
+    erased = _self_reference_ranges(root, node, source, name)
+    normalized = _normalize_subtree(root, source, erased)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
@@ -172,6 +261,7 @@ def build_anchor(
         symbol_path=symbol_path(file_path, target, source),
         node_kind=target.type,
         node_hash=node_hash(target, source),
+        name_hash=node_name_hash(target, source),
     )
 
 
