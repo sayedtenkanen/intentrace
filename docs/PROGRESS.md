@@ -49,9 +49,12 @@ file is the public record of what each slice actually delivered.
   queue, and no longer adds its anchor to that requirement. A same-span sketch
   proposing a new anchor is still a late anchor, pending until attested.
   `settle` and `ratify` show the attachment; the sketch may be ratified as a
-  separate obligation when it proposes code the existing effective baseline does
-  not cover, while a covered duplicate is still refused.
-- 131 tests (21 in `tests/test_slice4.py` unchanged); ruff, ruff format and
+  separate obligation when it proposes code the effective baselines do not
+  cover, while a covered duplicate is still refused. Coverage is checked
+  against every same-statement requirement and against effective baselines
+  only: a pending anchor never hides a later proposal, and `settle` does not
+  skip a same-statement sketch by text alone.
+- 136 tests (21 in `tests/test_slice4.py` unchanged); ruff, ruff format and
   `mypy --strict` clean.
 
 **Intentional behaviour changes**

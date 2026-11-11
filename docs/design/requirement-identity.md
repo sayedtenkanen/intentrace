@@ -334,9 +334,11 @@ the two are not the same requirement just because the words match. The sketch
 is shown beside the snapshot as "same words, different code" and stays in the
 queue; the snapshot's anchor set is not changed. `settle` and `ratify` show the
 attachment, and the sketch may be ratified as a separate obligation when it
-proposes code the existing effective baseline does not cover. A same-span
-sketch proposing a new anchor is a different case: it is a late anchor on the
-existing requirement, visible as pending until attested.
+proposes code the effective baselines do not cover. Coverage is the union of
+every same-statement requirement's effective baseline, and a pending anchor is
+not coverage until a human attests it. A same-span sketch proposing a new
+anchor is a different case: it is a late anchor on the existing requirement,
+visible as pending until attested.
 
 **Possible successor.** A sketch whose span partially overlaps a ratified
 snapshot's span, without either span being equal, is shown attached to the

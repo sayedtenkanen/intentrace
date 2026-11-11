@@ -202,9 +202,14 @@ from a late anchor:
   stays in the queue. `settle` shows it in the attached block and presents it
   for ratification; `ratify` repeats the attachment line before the prompt.
   Ratifying it as a separate obligation is allowed when it proposes an anchor
-  the existing requirement's effective baseline does not cover. If the
-  existing baseline already covers it, deduplication still refuses the second
-  ratification.
+  the effective baselines do not cover. Coverage is the union of the effective
+  baselines of every same-statement requirement, so an anchor covered by a
+  second same-statement requirement still counts. A pending anchor is display
+  state only and never counts as coverage until a human attests it. When the
+  union already covers the proposal, deduplication refuses the second
+  ratification. `settle` applies the same rule when deciding whether to skip a
+  later same-statement sketch: text alone is not enough, every proposed anchor
+  must be covered.
 
 The owner resolved the previously open item this way on 2026-11-11. The case
 cannot arise with `FakeExtractor`, because the same words resolve to the same
