@@ -149,9 +149,10 @@ def apply_decisions(
     a late anchor on that requirement: the anchor is shown as pending and is
     not in the baseline until attested. A sketch from a different observation
     with the same words is shown beside it as "same words, different code"
-    and stays in the queue; the snapshot's anchor set is not changed. A
-    partial span overlap is shown as a possible successor and also stays in
-    the queue.
+    and stays in the queue; the snapshot's anchor set is not changed. Coverage
+    is decided against the union of every same-statement requirement's
+    effective baseline, never against a pending anchor. A partial span overlap
+    is shown as a possible successor and also stays in the queue.
 
     Decisions are replayed in the order they were appended. A timestamp is
     display data and never decides which act came first; this holds even when
@@ -224,15 +225,13 @@ def apply_decisions(
 
     for sketch in requirements:
         span_match = next((a for a in active if _same_span(sketch, a)), None)
-        hash_match = next(
-            (
-                a
-                for a in active
-                if _normalize_for_hash(a.statement) == _normalize_for_hash(sketch.statement)
-            ),
-            None,
-        )
-        match = span_match or hash_match
+        statement = _normalize_for_hash(sketch.statement)
+        statement_matches = [a for a in active if _normalize_for_hash(a.statement) == statement]
+        if span_match is not None and span_match not in statement_matches:
+            # A same-span sketch is necessarily the same utterance; include it
+            # even if a defensive caller supplied odd provenance.
+            statement_matches.append(span_match)
+        match = span_match or (statement_matches[0] if statement_matches else None)
         if match is None:
             if any(_spans_overlap(sketch, a) for a in active):
                 target = next(a for a in active if _spans_overlap(sketch, a))
@@ -240,31 +239,51 @@ def apply_decisions(
             sketches.append(sketch)
             continue
 
-        recorded = {a.symbol_path for a in match.anchors}
-        extras = [a for a in sketch.anchors if a.symbol_path not in recorded]
-        if extras and span_match is not None:
+        # Coverage is always the effective baseline: attestations included,
+        # pending anchors excluded. A pending anchor is display state, not a
+        # human decision, and must not hide a later proposal.
+        covered: set[str] = set()
+        for existing in statement_matches:
+            assert existing.ratification is not None
+            covered.update(existing.ratification.baseline_hashes)
+        proposed = {a.symbol_path for a in sketch.anchors}
+        extras = [a for a in sketch.anchors if a.symbol_path not in covered]
+
+        if span_match is not None:
             # The same utterance re-derived with a new anchor: this is a late
-            # anchor on the existing requirement. It is visible as pending and
-            # becomes part of the baseline only when a human attests.
+            # anchor on that requirement. It is visible as pending and becomes
+            # part of the baseline only when a human attests.
             for anchor in extras:
-                if anchor.symbol_path not in {a.symbol_path for a in match.anchors}:
-                    match.anchors.append(anchor)
-        elif extras:
-            # Same words, different observation and code: show the sketch
-            # beside the requirement it resembles and leave it in the queue.
-            # It is not suppressed, and it does not silently become an anchor
-            # of the existing requirement. A human decides whether it is a
-            # separate obligation.
-            attached.append(Attached(sketch, match.req_id, "same words, different code"))
-            sketches.append(sketch)
-        else:
-            suppressed.append(
-                Suppressed(
-                    sketch,
-                    match.req_id,
-                    "same span" if span_match is not None else "same statement",
-                )
+                if anchor.symbol_path not in {a.symbol_path for a in span_match.anchors}:
+                    span_match.anchors.append(anchor)
+            if not extras:
+                suppressed.append(Suppressed(sketch, span_match.req_id, "same span"))
+            continue
+
+        if proposed <= covered:
+            # Every proposed anchor is already in force on some same-statement
+            # requirement. Point the suppression at a requirement that covers
+            # the whole proposal when one exists; otherwise a match covering
+            # part of it is still an honest place to look.
+            covering = next(
+                (
+                    existing
+                    for existing in statement_matches
+                    if existing.ratification is not None
+                    and proposed <= set(existing.ratification.baseline_hashes)
+                ),
+                match,
             )
+            suppressed.append(Suppressed(sketch, covering.req_id, "same statement"))
+            continue
+
+        # Same words, different observation and code: show the sketch beside
+        # the requirement it resembles and leave it in the queue. It is not
+        # suppressed, and it does not silently become an anchor of the
+        # existing requirement. A human decides whether it is a separate
+        # obligation.
+        attached.append(Attached(sketch, match.req_id, "same words, different code"))
+        sketches.append(sketch)
 
     return DecisionView(
         requirements=[*active, *sketches],
