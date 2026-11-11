@@ -43,7 +43,15 @@ file is the public record of what each slice actually delivered.
   and a body change afterwards; a lexical guard over `log.py` and
   `decisions.py` catches a timestamp-keyed sort or comparison and states that
   it is a guard, not a proof.
-- 128 tests (21 in `tests/test_slice4.py` unchanged); ruff, ruff format and
+- **Same words, different code.** The owner resolved the open item in favour of
+  presentation rather than mutation. A sketch from a different observation with
+  the same words is shown beside the requirement it resembles, stays in the
+  queue, and no longer adds its anchor to that requirement. A same-span sketch
+  proposing a new anchor is still a late anchor, pending until attested.
+  `settle` and `ratify` show the attachment; the sketch may be ratified as a
+  separate obligation when it proposes code the existing effective baseline does
+  not cover, while a covered duplicate is still refused.
+- 131 tests (21 in `tests/test_slice4.py` unchanged); ruff, ruff format and
   `mypy --strict` clean.
 
 **Intentional behaviour changes**
@@ -63,10 +71,6 @@ file is the public record of what each slice actually delivered.
 
 **Still incomplete (by design)**
 
-- The "same words, different code" case is attached as a late anchor rather
-  than shown as a separate decision item; it is recorded as open in
-  `docs/DEVIATIONS.md` for the owner to decide before slice 5. This pass did
-  not change it.
 - Migration proposals, evidence, `satisfied`/`locked`, and the CI gate remain
   out of scope.
 
@@ -85,9 +89,10 @@ file is the public record of what each slice actually delivered.
   reported orphaned with the reason, never promoted.
 - **Suppression.** A sketch is not proposed when a snapshot covers the same span in the
   same observation or the same normalised statement in any observation. Counts and reasons
-  are shown in `settle`. A sketch proposing an anchor the snapshot lacks is attached as a
-  late anchor; a partial span overlap is shown as a possible successor and stays in the
-  queue.
+  are shown in `settle`. A same-span sketch proposing an anchor the snapshot lacks is a
+  late anchor, pending until attested. A sketch from a different observation with the same
+  words is shown as "same words, different code" and stays in the queue. A partial span
+  overlap is shown as a possible successor and stays in the queue.
 - **Attest.** `intentrace attest <req_id>` records one act that sets the full baseline.
   The tool assigns the reason: `drift-accepted` (a rationale is required; also when a
   vanished anchor has no replacement and is dropped), `rename` or `move` when a missing
