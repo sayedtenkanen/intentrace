@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from intentrace.log import append_decision, append_observation, read_observations
-from intentrace.models import Decision, Observation, RequirementSnapshot
+from intentrace.models import Decision, Observation, RequirementSnapshot, Span
 
 FROB = "The frobnicate function must retry twice."
 
@@ -482,3 +482,157 @@ def test_why_shows_attestation_count_and_history(tmp_path: Path) -> None:
     assert "late-anchor" in history.stdout
     assert "first drift is acceptable" in history.stdout
     assert "second drift is acceptable" in history.stdout
+
+
+# 6. Same words, different code: show it, do not merge it.
+
+
+def _anchor(file: str, name: str, node_hash: str):
+    from intentrace.models import AnchorRef
+
+    return AnchorRef(
+        lang="python",
+        file=file,
+        symbol_path=f"{file}::{name}",
+        node_kind="function_definition",
+        node_hash=node_hash,
+        name_hash=node_hash,
+    )
+
+
+def test_same_words_different_code_is_shown_not_merged() -> None:
+    """The snapshot's anchors are left alone; the sketch stays for a decision."""
+    from intentrace.decisions import apply_decisions
+    from intentrace.models import Requirement
+    from intentrace.symbol import SymbolTable
+
+    statement = FROB
+    anchor_a = _anchor("app.py", "frobnicate", "1" * 64)
+    anchor_b = _anchor("other.py", "frobnicate", "2" * 64)
+    req_a = Requirement.create(
+        statement,
+        [Span(obs_id="a" * 64, start=0, end=len(statement))],
+        "fake-v2",
+        anchors=[anchor_a],
+    )
+    req_b = Requirement.create(
+        statement,
+        [Span(obs_id="b" * 64, start=0, end=len(statement))],
+        "fake-v2",
+        anchors=[anchor_b],
+    )
+    ratify = Decision.create(
+        kind="ratify",
+        req_id=req_a.req_id,
+        actor="tester",
+        baseline_hashes={anchor_a.symbol_path: anchor_a.node_hash},
+        baseline_name_hashes={anchor_a.symbol_path: anchor_a.name_hash},
+        snapshot=RequirementSnapshot(
+            statement=statement,
+            provenance=req_a.provenance,
+            extractor_version="fake-v2",
+        ),
+    )
+    symbols = SymbolTable(
+        by_qualified={anchor_a.symbol_path: anchor_a, anchor_b.symbol_path: anchor_b}
+    )
+
+    view = apply_decisions([req_a, req_b], [ratify], symbols)
+
+    active = [r for r in view.requirements if r.maturity == "active"]
+    assert len(active) == 1
+    assert {a.symbol_path for a in active[0].anchors} == {anchor_a.symbol_path}
+    attached = [a for a in view.attached if a.sketch.req_id == req_b.req_id]
+    assert len(attached) == 1
+    assert attached[0].reason == "same words, different code"
+    assert attached[0].snapshot_req_id == req_a.req_id
+    assert any(r.maturity == "sketch" and r.req_id == req_b.req_id for r in view.requirements)
+    assert all(s.sketch.req_id != req_b.req_id for s in view.suppressed)
+
+
+def test_duplicate_statement_with_a_new_anchor_can_be_ratified(tmp_path: Path) -> None:
+    """A same-words sketch proposing different code is a separate obligation."""
+    import intentrace.cli as cli
+
+    (tmp_path / ".intentrace").mkdir()
+    statement = FROB
+    existing = Decision.create(
+        kind="ratify",
+        req_id="a" * 64,
+        actor="tester",
+        baseline_hashes={"app.py::frobnicate": "1" * 64},
+        snapshot=RequirementSnapshot(
+            statement=statement,
+            provenance=[Span(obs_id="a" * 64, start=0, end=len(statement))],
+            extractor_version="fake-v2",
+        ),
+    )
+    append_decision(tmp_path, existing)
+
+    decision = cli._record_ratification(
+        tmp_path,
+        "b" * 64,
+        "tester",
+        "",
+        {"other.py::frobnicate": "2" * 64},
+        {"other.py::frobnicate": "2" * 64},
+        RequirementSnapshot(
+            statement=statement,
+            provenance=[Span(obs_id="b" * 64, start=0, end=len(statement))],
+            extractor_version="fake-v2",
+        ),
+    )
+
+    assert decision is not None
+    assert [d.req_id for d in read_observations(tmp_path).decisions] == [
+        "a" * 64,
+        "b" * 64,
+    ]
+
+
+def test_duplicate_statement_already_covered_is_still_refused(tmp_path: Path) -> None:
+    """Dedup still wins when the existing effective baseline covers the candidate."""
+    import intentrace.cli as cli
+
+    (tmp_path / ".intentrace").mkdir()
+    statement = FROB
+    existing = Decision.create(
+        kind="ratify",
+        req_id="a" * 64,
+        actor="tester",
+        baseline_hashes={"app.py::frobnicate": "1" * 64},
+        snapshot=RequirementSnapshot(
+            statement=statement,
+            provenance=[Span(obs_id="a" * 64, start=0, end=len(statement))],
+            extractor_version="fake-v2",
+        ),
+    )
+    covered = Decision.create(
+        kind="attest",
+        req_id="a" * 64,
+        actor="tester",
+        reason="late-anchor",
+        baseline_hashes={
+            "app.py::frobnicate": "1" * 64,
+            "other.py::frobnicate": "2" * 64,
+        },
+    )
+    append_decision(tmp_path, existing)
+    append_decision(tmp_path, covered)
+
+    decision = cli._record_ratification(
+        tmp_path,
+        "b" * 64,
+        "tester",
+        "",
+        {"other.py::frobnicate": "2" * 64},
+        {"other.py::frobnicate": "2" * 64},
+        RequirementSnapshot(
+            statement=statement,
+            provenance=[Span(obs_id="b" * 64, start=0, end=len(statement))],
+            extractor_version="fake-v2",
+        ),
+    )
+
+    assert decision is None
+    assert len(read_observations(tmp_path).decisions) == 2

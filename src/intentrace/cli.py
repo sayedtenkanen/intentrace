@@ -33,6 +33,7 @@ from intentrace.decisions import (
     check_fresh,
     judge_requirement,
     match_req_id,
+    replay_baselines,
 )
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import (
@@ -342,8 +343,12 @@ def _record_ratification(
     processes cannot both pass the check. Only one snapshot-bearing ratify
     may make a requirement active; a decision written before snapshots
     existed does not block re-ratifying. A different requirement with the
-    same normalised statement is also refused: separate observations
-    produce different ids, and ratifying both would persist duplicates.
+    same normalised statement is refused when its proposed anchors are
+    already covered by the existing requirement's effective baseline:
+    separate observations produce different ids, and ratifying both would
+    persist duplicates. When it proposes an anchor the existing requirement
+    does not hold, that is the "same words, different code" case and the
+    human may ratify it as a separate obligation.
 
     Returns the appended decision, or None when the requirement became
     covered while the human was deciding.
@@ -361,13 +366,19 @@ def _record_ratification(
         ):
             return None
         statement = _normalize_for_hash(snapshot.statement)
+        proposed = set(baseline)
+        latest: dict[str, Decision] = {}
         for d in fresh.decisions:
-            if (
-                d.kind == "ratify"
-                and d.req_id != req_id
-                and d.snapshot is not None
-                and _normalize_for_hash(d.snapshot.statement) == statement
-            ):
+            if d.kind == "ratify" and d.snapshot is not None:
+                latest[d.req_id] = d
+        for existing_req_id, existing in latest.items():
+            if existing_req_id == req_id:
+                continue
+            assert existing.snapshot is not None
+            if _normalize_for_hash(existing.snapshot.statement) != statement:
+                continue
+            effective, _name_baseline, _attestations = replay_baselines(fresh.decisions, existing)
+            if proposed <= set(effective):
                 return None
         decision = Decision.create(
             kind="ratify",
@@ -469,6 +480,9 @@ def cmd_ratify(args: argparse.Namespace) -> int:
             judge_requirement(candidate, view.symbols),
         )
     )
+    for attachment in view.attached:
+        if attachment.sketch.req_id == candidate.req_id:
+            print(f"  attached   R-{attachment.snapshot_req_id[:8]} · {attachment.reason}")
     print()
     answer = _ask(f"Ratify {req_short} as an obligation? [y/N] ")
     if answer is None or answer.strip().lower() not in ("y", "yes"):
@@ -872,7 +886,10 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print()
 
     if view.attached:
-        print(f"attached sketches: {len(view.attached)} — shown, not proposed as new")
+        print(
+            f"attached sketches: {len(view.attached)} — "
+            "shown beside the requirement they resemble, for a decision"
+        )
         for a in view.attached:
             print(f'  R-{a.snapshot_req_id[:8]} · {a.reason}: "{a.sketch.statement[:50]}"')
         print()

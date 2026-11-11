@@ -42,7 +42,7 @@ class Suppressed:
 
 @dataclass(frozen=True)
 class Attached:
-    """A sketch shown attached to a snapshot instead of being dropped."""
+    """A sketch shown beside a snapshot it resembles; it stays in the queue."""
 
     sketch: Requirement
     snapshot_req_id: str
@@ -94,6 +94,43 @@ def _same_span(sketch: Requirement, active: Requirement) -> bool:
     )
 
 
+def replay_baselines(
+    decisions: list[Decision], snapshot_decision: Decision
+) -> tuple[dict[str, str], dict[str, str], list[Attestation]]:
+    """Replay the valid attestations appended after one snapshot-bearing ratify.
+
+    Returns the baseline in force now, its name-insensitive companion, and
+    every attestation that replaced it, in append order. An attestation
+    belonging to a superseded ratification, or to another requirement, is
+    ignored. Position in the log is the only order.
+    """
+    baseline = dict(snapshot_decision.baseline_hashes)
+    name_baseline = dict(snapshot_decision.baseline_name_hashes)
+    attestations: list[Attestation] = []
+    snapshot_index = next(
+        index for index, decision in enumerate(decisions) if decision is snapshot_decision
+    )
+    for attest in decisions[snapshot_index + 1 :]:
+        if attest.kind != "attest" or attest.req_id != snapshot_decision.req_id:
+            continue
+        # An attestation always replaces the baseline, including with an
+        # empty one: that is how a deleted anchor is acknowledged. A
+        # malformed attestation never replaces a trusted baseline.
+        if not _is_valid_attestation(attest):
+            continue
+        baseline = dict(attest.baseline_hashes)
+        name_baseline = dict(attest.baseline_name_hashes)
+        attestations.append(
+            Attestation(
+                timestamp=attest.timestamp,
+                actor=attest.actor,
+                reason=attest.reason or "",
+                rationale=attest.rationale,
+            )
+        )
+    return baseline, name_baseline, attestations
+
+
 def apply_decisions(
     requirements: list[Requirement],
     decisions: list[Decision],
@@ -108,8 +145,13 @@ def apply_decisions(
     Decisions written before slice 4 have none; they are reported orphaned
     with the reason, never silently promoted. A sketch is suppressed when a
     snapshot already covers the same span or the same normalised statement.
-    A sketch proposing an anchor the snapshot lacks is attached as a late
-    anchor; a partial span overlap is attached as a possible successor.
+    A sketch from the same span that proposes an anchor the snapshot lacks is
+    a late anchor on that requirement: the anchor is shown as pending and is
+    not in the baseline until attested. A sketch from a different observation
+    with the same words is shown beside it as "same words, different code"
+    and stays in the queue; the snapshot's anchor set is not changed. A
+    partial span overlap is shown as a possible successor and also stays in
+    the queue.
 
     Decisions are replayed in the order they were appended. A timestamp is
     display data and never decides which act came first; this holds even when
@@ -137,32 +179,9 @@ def apply_decisions(
             continue
         assert snapshot_decision.snapshot is not None
 
-        baseline = dict(snapshot_decision.baseline_hashes)
-        name_baseline = dict(snapshot_decision.baseline_name_hashes)
-        attestations: list[Attestation] = []
         # Only attestations appended after this ratification may replace its
         # baseline. An earlier attestation belongs to a superseded ratification.
-        snapshot_index = next(
-            index for index, decision in enumerate(decisions) if decision is snapshot_decision
-        )
-        for attest in decisions[snapshot_index + 1 :]:
-            if attest.kind != "attest" or attest.req_id != req_id:
-                continue
-            # An attestation always replaces the baseline, including with an
-            # empty one: that is how a deleted anchor is acknowledged. A
-            # malformed attestation never replaces a trusted baseline.
-            if not _is_valid_attestation(attest):
-                continue
-            baseline = dict(attest.baseline_hashes)
-            name_baseline = dict(attest.baseline_name_hashes)
-            attestations.append(
-                Attestation(
-                    timestamp=attest.timestamp,
-                    actor=attest.actor,
-                    reason=attest.reason or "",
-                    rationale=attest.rationale,
-                )
-            )
+        baseline, name_baseline, attestations = replay_baselines(decisions, snapshot_decision)
         last_attest = attestations[-1] if attestations else None
 
         active.append(
@@ -223,11 +242,21 @@ def apply_decisions(
 
         recorded = {a.symbol_path for a in match.anchors}
         extras = [a for a in sketch.anchors if a.symbol_path not in recorded]
-        if extras:
+        if extras and span_match is not None:
+            # The same utterance re-derived with a new anchor: this is a late
+            # anchor on the existing requirement. It is visible as pending and
+            # becomes part of the baseline only when a human attests.
             for anchor in extras:
                 if anchor.symbol_path not in {a.symbol_path for a in match.anchors}:
                     match.anchors.append(anchor)
+        elif extras:
+            # Same words, different observation and code: show the sketch
+            # beside the requirement it resembles and leave it in the queue.
+            # It is not suppressed, and it does not silently become an anchor
+            # of the existing requirement. A human decides whether it is a
+            # separate obligation.
             attached.append(Attached(sketch, match.req_id, "same words, different code"))
+            sketches.append(sketch)
         else:
             suppressed.append(
                 Suppressed(
