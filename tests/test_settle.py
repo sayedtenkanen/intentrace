@@ -823,8 +823,8 @@ def test_record_ratification_rejects_concurrent_ratify(tmp_path: Path) -> None:
     )
 
     recorded = cli._record_ratification(repo, req_id, "tester", "", {"a": "b"}, {}, snapshot)
-    assert recorded is not None
-    assert recorded.req_id == req_id
+    assert recorded.decision is not None
+    assert recorded.decision.req_id == req_id
     assert log_line_count(repo) == 2
 
     # A second process recorded while this one was deciding: the re-read
@@ -832,7 +832,7 @@ def test_record_ratification_rejects_concurrent_ratify(tmp_path: Path) -> None:
     rival = Decision.create(kind="ratify", req_id="other", actor="rival", snapshot=snapshot)
     append_decision(repo, rival)
     before = log_line_count(repo)
-    assert cli._record_ratification(repo, "other", "tester", "", {}, {}, snapshot) is None
+    assert cli._record_ratification(repo, "other", "tester", "", {}, {}, snapshot).decision is None
     assert log_line_count(repo) == before
     assert len(MemoryStore(repo).get_decisions("other")) == 1
 

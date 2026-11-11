@@ -187,12 +187,32 @@ rationale. `why --history` prints every attestation and every rationale in
 append order. The flag is the chosen way to keep earlier rationales reachable
 without opening the log by hand.
 
-### Open — same words, different code
+### Same words, different code (resolved)
 
-A sketch whose words match a ratified snapshot but whose proposed anchor the
-snapshot lacks is currently attached to the existing requirement as a late
-anchor. The intended presentation is a separate "same words, different code"
-item for a decision. The case cannot arise with `FakeExtractor`, because the
-same words resolve to the same symbols; a model-backed linker will reach it.
-This is recorded as **open** for the owner to decide before slice 5. This pass
-did not change the behaviour.
+A sketch whose words match a ratified snapshot but whose span is a different
+observation is the "same words, different code" case. The fix distinguishes it
+from a late anchor:
+
+- A sketch from the **same span** that proposes an anchor the snapshot lacks is
+  a late anchor on that requirement. The anchor is added to the view as
+  pending and enters the baseline only when a human attests.
+- A sketch from a **different observation** with the same words is shown beside
+  the requirement it resembles as "same words, different code". The existing
+  requirement's anchor set is not changed, the sketch is not suppressed, and it
+  stays in the queue. `settle` shows it in the attached block and presents it
+  for ratification; `ratify` repeats the attachment line before the prompt.
+  Ratifying it as a separate obligation is allowed when it proposes an anchor
+  the effective baselines do not cover. Coverage is the union of the effective
+  baselines of every same-statement requirement, so an anchor covered by a
+  second same-statement requirement still counts. A pending anchor is display
+  state only and never counts as coverage until a human attests it. When the
+  union already covers the proposal, deduplication refuses the second
+  ratification. `settle` applies the same rule when deciding whether to skip a
+  later same-statement sketch: text alone is not enough, every proposed anchor
+  must be covered.
+
+The owner resolved the previously open item this way on 2026-11-11. The case
+cannot arise with `FakeExtractor`, because the same words resolve to the same
+symbols; a model-backed linker will reach it. The view-level behaviour and the
+ratification guard are covered by tests that construct the two observations
+directly.

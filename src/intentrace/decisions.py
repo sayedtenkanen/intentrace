@@ -42,7 +42,7 @@ class Suppressed:
 
 @dataclass(frozen=True)
 class Attached:
-    """A sketch shown attached to a snapshot instead of being dropped."""
+    """A sketch shown beside a snapshot it resembles; it stays in the queue."""
 
     sketch: Requirement
     snapshot_req_id: str
@@ -94,6 +94,43 @@ def _same_span(sketch: Requirement, active: Requirement) -> bool:
     )
 
 
+def replay_baselines(
+    decisions: list[Decision], snapshot_decision: Decision
+) -> tuple[dict[str, str], dict[str, str], list[Attestation]]:
+    """Replay the valid attestations appended after one snapshot-bearing ratify.
+
+    Returns the baseline in force now, its name-insensitive companion, and
+    every attestation that replaced it, in append order. An attestation
+    belonging to a superseded ratification, or to another requirement, is
+    ignored. Position in the log is the only order.
+    """
+    baseline = dict(snapshot_decision.baseline_hashes)
+    name_baseline = dict(snapshot_decision.baseline_name_hashes)
+    attestations: list[Attestation] = []
+    snapshot_index = next(
+        index for index, decision in enumerate(decisions) if decision is snapshot_decision
+    )
+    for attest in decisions[snapshot_index + 1 :]:
+        if attest.kind != "attest" or attest.req_id != snapshot_decision.req_id:
+            continue
+        # An attestation always replaces the baseline, including with an
+        # empty one: that is how a deleted anchor is acknowledged. A
+        # malformed attestation never replaces a trusted baseline.
+        if not _is_valid_attestation(attest):
+            continue
+        baseline = dict(attest.baseline_hashes)
+        name_baseline = dict(attest.baseline_name_hashes)
+        attestations.append(
+            Attestation(
+                timestamp=attest.timestamp,
+                actor=attest.actor,
+                reason=attest.reason or "",
+                rationale=attest.rationale,
+            )
+        )
+    return baseline, name_baseline, attestations
+
+
 def apply_decisions(
     requirements: list[Requirement],
     decisions: list[Decision],
@@ -108,8 +145,14 @@ def apply_decisions(
     Decisions written before slice 4 have none; they are reported orphaned
     with the reason, never silently promoted. A sketch is suppressed when a
     snapshot already covers the same span or the same normalised statement.
-    A sketch proposing an anchor the snapshot lacks is attached as a late
-    anchor; a partial span overlap is attached as a possible successor.
+    A sketch from the same span that proposes an anchor the snapshot lacks is
+    a late anchor on that requirement: the anchor is shown as pending and is
+    not in the baseline until attested. A sketch from a different observation
+    with the same words is shown beside it as "same words, different code"
+    and stays in the queue; the snapshot's anchor set is not changed. Coverage
+    is decided against the union of every same-statement requirement's
+    effective baseline, never against a pending anchor. A partial span overlap
+    is shown as a possible successor and also stays in the queue.
 
     Decisions are replayed in the order they were appended. A timestamp is
     display data and never decides which act came first; this holds even when
@@ -137,32 +180,9 @@ def apply_decisions(
             continue
         assert snapshot_decision.snapshot is not None
 
-        baseline = dict(snapshot_decision.baseline_hashes)
-        name_baseline = dict(snapshot_decision.baseline_name_hashes)
-        attestations: list[Attestation] = []
         # Only attestations appended after this ratification may replace its
         # baseline. An earlier attestation belongs to a superseded ratification.
-        snapshot_index = next(
-            index for index, decision in enumerate(decisions) if decision is snapshot_decision
-        )
-        for attest in decisions[snapshot_index + 1 :]:
-            if attest.kind != "attest" or attest.req_id != req_id:
-                continue
-            # An attestation always replaces the baseline, including with an
-            # empty one: that is how a deleted anchor is acknowledged. A
-            # malformed attestation never replaces a trusted baseline.
-            if not _is_valid_attestation(attest):
-                continue
-            baseline = dict(attest.baseline_hashes)
-            name_baseline = dict(attest.baseline_name_hashes)
-            attestations.append(
-                Attestation(
-                    timestamp=attest.timestamp,
-                    actor=attest.actor,
-                    reason=attest.reason or "",
-                    rationale=attest.rationale,
-                )
-            )
+        baseline, name_baseline, attestations = replay_baselines(decisions, snapshot_decision)
         last_attest = attestations[-1] if attestations else None
 
         active.append(
@@ -205,15 +225,13 @@ def apply_decisions(
 
     for sketch in requirements:
         span_match = next((a for a in active if _same_span(sketch, a)), None)
-        hash_match = next(
-            (
-                a
-                for a in active
-                if _normalize_for_hash(a.statement) == _normalize_for_hash(sketch.statement)
-            ),
-            None,
-        )
-        match = span_match or hash_match
+        statement = _normalize_for_hash(sketch.statement)
+        statement_matches = [a for a in active if _normalize_for_hash(a.statement) == statement]
+        if span_match is not None and span_match not in statement_matches:
+            # A same-span sketch is necessarily the same utterance; include it
+            # even if a defensive caller supplied odd provenance.
+            statement_matches.append(span_match)
+        match = span_match or (statement_matches[0] if statement_matches else None)
         if match is None:
             if any(_spans_overlap(sketch, a) for a in active):
                 target = next(a for a in active if _spans_overlap(sketch, a))
@@ -221,21 +239,51 @@ def apply_decisions(
             sketches.append(sketch)
             continue
 
-        recorded = {a.symbol_path for a in match.anchors}
-        extras = [a for a in sketch.anchors if a.symbol_path not in recorded]
-        if extras:
+        # Coverage is always the effective baseline: attestations included,
+        # pending anchors excluded. A pending anchor is display state, not a
+        # human decision, and must not hide a later proposal.
+        covered: set[str] = set()
+        for existing in statement_matches:
+            assert existing.ratification is not None
+            covered.update(existing.ratification.baseline_hashes)
+        proposed = {a.symbol_path for a in sketch.anchors}
+        extras = [a for a in sketch.anchors if a.symbol_path not in covered]
+
+        if span_match is not None:
+            # The same utterance re-derived with a new anchor: this is a late
+            # anchor on that requirement. It is visible as pending and becomes
+            # part of the baseline only when a human attests.
             for anchor in extras:
-                if anchor.symbol_path not in {a.symbol_path for a in match.anchors}:
-                    match.anchors.append(anchor)
-            attached.append(Attached(sketch, match.req_id, "same words, different code"))
-        else:
-            suppressed.append(
-                Suppressed(
-                    sketch,
-                    match.req_id,
-                    "same span" if span_match is not None else "same statement",
-                )
+                if anchor.symbol_path not in {a.symbol_path for a in span_match.anchors}:
+                    span_match.anchors.append(anchor)
+            if not extras:
+                suppressed.append(Suppressed(sketch, span_match.req_id, "same span"))
+            continue
+
+        if proposed <= covered:
+            # Every proposed anchor is already in force on some same-statement
+            # requirement. Point the suppression at a requirement that covers
+            # the whole proposal when one exists; otherwise a match covering
+            # part of it is still an honest place to look.
+            covering = next(
+                (
+                    existing
+                    for existing in statement_matches
+                    if existing.ratification is not None
+                    and proposed <= set(existing.ratification.baseline_hashes)
+                ),
+                match,
             )
+            suppressed.append(Suppressed(sketch, covering.req_id, "same statement"))
+            continue
+
+        # Same words, different observation and code: show the sketch beside
+        # the requirement it resembles and leave it in the queue. It is not
+        # suppressed, and it does not silently become an anchor of the
+        # existing requirement. A human decides whether it is a separate
+        # obligation.
+        attached.append(Attached(sketch, match.req_id, "same words, different code"))
+        sketches.append(sketch)
 
     return DecisionView(
         requirements=[*active, *sketches],

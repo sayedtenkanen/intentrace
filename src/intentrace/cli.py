@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -33,6 +34,7 @@ from intentrace.decisions import (
     check_fresh,
     judge_requirement,
     match_req_id,
+    replay_baselines,
 )
 from intentrace.extract.fake import FakeExtractor
 from intentrace.log import (
@@ -327,6 +329,19 @@ def _stale_lines(req_short: str, outcome: Stale, candidate: Requirement) -> list
     return lines
 
 
+@dataclass(frozen=True)
+class RatifyResult:
+    """Outcome of attempting to record a ratification.
+
+    ``decision`` is None when the act was refused. ``refusal`` names why, so
+    a caller can distinguish this requirement already being active from
+    another requirement's baseline already covering the proposal.
+    """
+
+    decision: Decision | None = None
+    refusal: Literal["already-active", "covered-by-another", "corrupt-log"] | None = None
+
+
 def _record_ratification(
     repo_root: Path,
     req_id: str,
@@ -335,23 +350,25 @@ def _record_ratification(
     baseline: dict[str, str],
     baseline_name_hashes: dict[str, str],
     snapshot: RequirementSnapshot,
-) -> Decision | None:
+) -> RatifyResult:
     """Append a ratify decision unless one landed while deciding.
 
     The log lock is held across the re-read and the append, so two
     processes cannot both pass the check. Only one snapshot-bearing ratify
     may make a requirement active; a decision written before snapshots
     existed does not block re-ratifying. A different requirement with the
-    same normalised statement is also refused: separate observations
-    produce different ids, and ratifying both would persist duplicates.
-
-    Returns the appended decision, or None when the requirement became
-    covered while the human was deciding.
+    same normalised statement is refused when its proposed anchors are
+    already covered by the union of the effective baselines of every
+    same-statement requirement: separate observations produce different
+    ids, and ratifying both would persist duplicates. When the proposal
+    has an anchor no effective baseline covers, that is the "same words,
+    different code" case and the human may ratify it as a separate
+    obligation.
     """
     with log_lock(repo_root):
         fresh = read_observations(repo_root)
         if fresh.corrupt_line is not None:
-            return None
+            return RatifyResult(refusal="corrupt-log")
         # Only a snapshot-bearing ratify makes a requirement active. A decision
         # written before snapshots existed must not block re-ratifying the same
         # sketch: that would leave an orphaned requirement with no exit.
@@ -359,16 +376,26 @@ def _record_ratification(
             d.kind == "ratify" and d.req_id == req_id and d.snapshot is not None
             for d in fresh.decisions
         ):
-            return None
+            return RatifyResult(refusal="already-active")
         statement = _normalize_for_hash(snapshot.statement)
+        proposed = set(baseline)
+        latest: dict[str, Decision] = {}
         for d in fresh.decisions:
-            if (
-                d.kind == "ratify"
-                and d.req_id != req_id
-                and d.snapshot is not None
-                and _normalize_for_hash(d.snapshot.statement) == statement
-            ):
-                return None
+            if d.kind == "ratify" and d.snapshot is not None:
+                latest[d.req_id] = d
+        covered: set[str] = set()
+        saw_same_statement = False
+        for existing_req_id, existing in latest.items():
+            if existing_req_id == req_id:
+                continue
+            assert existing.snapshot is not None
+            if _normalize_for_hash(existing.snapshot.statement) != statement:
+                continue
+            saw_same_statement = True
+            effective, _name_baseline, _attestations = replay_baselines(fresh.decisions, existing)
+            covered.update(effective)
+        if saw_same_statement and proposed <= covered:
+            return RatifyResult(refusal="covered-by-another")
         decision = Decision.create(
             kind="ratify",
             req_id=req_id,
@@ -379,7 +406,7 @@ def _record_ratification(
             snapshot=snapshot,
         )
         append_decision(repo_root, decision)
-        return decision
+        return RatifyResult(decision=decision)
 
 
 def _record_attestation(
@@ -469,6 +496,9 @@ def cmd_ratify(args: argparse.Namespace) -> int:
             judge_requirement(candidate, view.symbols),
         )
     )
+    for attachment in view.attached:
+        if attachment.sketch.req_id == candidate.req_id:
+            print(f"  attached   R-{attachment.snapshot_req_id[:8]} · {attachment.reason}")
     print()
     answer = _ask(f"Ratify {req_short} as an obligation? [y/N] ")
     if answer is None or answer.strip().lower() not in ("y", "yes"):
@@ -506,7 +536,7 @@ def cmd_ratify(args: argparse.Namespace) -> int:
         provenance=candidate.provenance,
         extractor_version=candidate.derivation.extractor_version,
     )
-    decision = _record_ratification(
+    result = _record_ratification(
         repo_root,
         candidate.req_id,
         actor,
@@ -515,9 +545,18 @@ def cmd_ratify(args: argparse.Namespace) -> int:
         outcome.baseline_name_hashes,
         snapshot,
     )
-    if decision is None:
-        print(f"{req_short} is already active — not recorded twice")
-        return 0
+    if result.decision is None:
+        if result.refusal == "covered-by-another":
+            print(
+                f"{req_short} is already covered by another requirement's "
+                "ratification — not recorded twice"
+            )
+            return 0
+        if result.refusal == "already-active":
+            print(f"{req_short} is already active — not recorded twice")
+            return 0
+        print(f"error: cannot ratify {req_short}: the log is corrupt", file=sys.stderr)
+        return 1
     print(f"ratified {req_short}  baseline {len(outcome.baseline)} anchor(s)")
     return 0
 
@@ -872,7 +911,10 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print()
 
     if view.attached:
-        print(f"attached sketches: {len(view.attached)} — shown, not proposed as new")
+        print(
+            f"attached sketches: {len(view.attached)} — "
+            "shown beside the requirement they resemble, for a decision"
+        )
         for a in view.attached:
             print(f'  R-{a.snapshot_req_id[:8]} · {a.reason}: "{a.sketch.statement[:50]}"')
         print()
@@ -897,16 +939,24 @@ def cmd_settle(args: argparse.Namespace) -> int:
         print("nothing to settle — no unratified sketches")
         return 0
 
-    ratified_statements: set[str] = set()
+    # Coverage for the skip check is the effective baseline, never a pending
+    # anchor. Seed from the active view, then grow it as this run ratifies:
+    # a later sketch is skipped only when every anchor it proposes is already
+    # in force. A same-statement sketch with an uncovered anchor is a
+    # separate obligation and must still be presented.
+    covered_by_statement: dict[str, set[str]] = {}
+    for req in view.requirements:
+        if req.maturity != "active" or req.ratification is None:
+            continue
+        key = _normalize_for_hash(req.statement)
+        covered_by_statement.setdefault(key, set()).update(req.ratification.baseline_hashes)
+
     for sketch in sketches:
         req_short = f"R-{sketch.req_id[:8]}"
         statement = _normalize_for_hash(sketch.statement)
-        # Two observations can yield the same statement with different ids.
-        # The first ratification in this run covers the rest: re-checking
-        # the log inside _record_ratification would otherwise prompt the
-        # human for a duplicate that is then refused.
-        if statement in ratified_statements:
-            print(f"{req_short} already covered by a statement ratified in this run — skipped.")
+        proposed = {a.symbol_path for a in sketch.anchors}
+        if proposed and proposed <= covered_by_statement.get(statement, set()):
+            print(f"{req_short} already covered by a ratified statement — skipped.")
             skipped += 1
             continue
         print(
@@ -953,7 +1003,7 @@ def cmd_settle(args: argparse.Namespace) -> int:
             provenance=sketch.provenance,
             extractor_version=sketch.derivation.extractor_version,
         )
-        decision = _record_ratification(
+        result = _record_ratification(
             repo_root,
             sketch.req_id,
             actor,
@@ -962,13 +1012,13 @@ def cmd_settle(args: argparse.Namespace) -> int:
             outcome.baseline_name_hashes,
             snapshot,
         )
-        if decision is None:
+        if result.decision is None:
             print(f"{req_short} became active or was covered while confirming — skipped.")
             skipped += 1
             continue
         print(f"ratified {req_short}")
         ratified += 1
-        ratified_statements.add(statement)
+        covered_by_statement.setdefault(statement, set()).update(outcome.baseline)
 
     print(f"settle done: {attested} attested, {ratified} ratified, {skipped} skipped.")
     return 0
